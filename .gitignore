@@ -1,0 +1,43 @@
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+
+# Downloaded videos and metadata
+videos/
+jsons/
+output/
+downloaded_files/
+need_parse.json
+need_parse_unique.json
+
+# Logs
+*.log
+download.log
+
+# Failed downloads tracking
+failed_downloads.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Configuration (contains credentials)
+config.json
+config.local.json
+test_configs/*.local.json
+
+# Selenium
+*.crx
+seleniumwire/
+
+# Chrome driver
+chromedriver*

@@ -1,0 +1,74 @@
+{
+  "vimeo_api": {
+    "token": "YOUR_VIMEO_TOKEN",
+    "secret": "YOUR_VIMEO_SECRET",
+    "client_id": "YOUR_VIMEO_CLIENT_ID"
+  },
+  "proxy": {
+    "enabled": false,
+    "host": "YOUR_PROXY_HOST",
+    "port": "3128",
+    "username": "YOUR_PROXY_USERNAME",
+    "password": "YOUR_PROXY_PASSWORD"
+  },
+  "files": {
+    "source_json": "../testdata/server_smoke_urls.json",
+    "videos_dir": "../output/watchdog_telegram/videos",
+    "jsons_dir": "../output/watchdog_telegram/jsons",
+    "logs_dir": "../output/watchdog_telegram",
+    "failed_downloads": "../output/watchdog_telegram/failed_downloads.json",
+    "log_file": "../output/watchdog_telegram/download.log",
+    "summary_file": "../output/watchdog_telegram/summary.json"
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+    "chat_id": "YOUR_TELEGRAM_CHAT_ID",
+    "notify_download_every_n_successes": 100,
+    "notify_skip_every_n_processed": 0,
+    "notify_progress_every_n_processed": 100,
+    "notify_progress_min_interval_seconds": 0,
+    "notify_on_start": true,
+    "notify_on_finish": true,
+    "notify_on_error": true,
+    "notify_on_ip_block": true,
+    "notify_on_stall": true,
+    "notify_on_heartbeat": true
+  },
+  "settings": {
+    "test_mode": false,
+    "test_limit": 1,
+    "retry_attempts": 1,
+    "retry_delay": 1,
+    "javascript_wait_time": 15,
+    "download_timeout": 600,
+    "connect_timeout": 30,
+    "download_chunk_size_kb": 512,
+    "download_progress_log_seconds": 10
+  },
+  "browser": {
+    "uc": true,
+    "headless": true,
+    "xvfb": false,
+    "disable_csp": true,
+    "block_images": false,
+    "incognito": false,
+    "chromium_arg": "--disable-blink-features=AutomationControlled"
+  },
+  "runtime": {
+    "job_name": "Vimeo Downloader Watchdog Smoke",
+    "worker_name": "watchdog-smoke",
+    "worker_index": 1,
+    "worker_count": 1
+  },
+  "watchdog": {
+    "enabled": true,
+    "stall_alert_after_seconds": 3,
+    "repeat_alert_every_seconds": 999,
+    "heartbeat_every_seconds": 3
+  },
+  "workers": {
+    "count": 1,
+    "stagger_start_seconds": 1
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "vimeo_api": {
+    "token": "YOUR_VIMEO_TOKEN",
+    "secret": "YOUR_VIMEO_SECRET",
+    "client_id": "YOUR_VIMEO_CLIENT_ID"
+  },
+  "proxy": {
+    "enabled": false,
+    "host": "YOUR_PROXY_HOST",
+    "port": "3128",
+    "username": "YOUR_PROXY_USERNAME",
+    "password": "YOUR_PROXY_PASSWORD"
+  },
+  "files": {
+    "source_json": "/absolute/path/to/need_parse_unique.json",
+    "videos_dir": "output/run/videos",
+    "jsons_dir": "output/run/jsons",
+    "logs_dir": "output/run",
+    "failed_downloads": "output/run/failed_downloads.json",
+    "log_file": "output/run/download.log",
+    "summary_file": "output/run/summary.json",
+    "results_file": "output/run/results_manifest.json"
+  },
+  "telegram": {
+    "enabled": true,
+    "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+    "chat_id": "YOUR_TELEGRAM_CHAT_ID",
+    "notify_download_every_n_successes": 5,
+    "notify_skip_every_n_processed": 0,
+    "notify_progress_every_n_processed": 25,
+    "notify_progress_min_interval_seconds": 300,
+    "notify_on_start": true,
+    "notify_on_finish": true,
+    "notify_on_error": true,
+    "notify_on_ip_block": true,
+    "notify_on_stall": true,
+    "notify_on_heartbeat": true
+  },
+  "settings": {
+    "test_mode": true,
+    "test_limit": 50,
+    "retry_attempts": 3,
+    "retry_delay": 5,
+    "javascript_wait_time": 15,
+    "download_timeout": 600,
+    "connect_timeout": 30,
+    "download_chunk_size_kb": 1024,
+    "download_progress_log_seconds": 15
+  },
+  "browser": {
+    "uc": true,
+    "headless": false,
+    "xvfb": false,
+    "disable_csp": true,
+    "block_images": false,
+    "incognito": false,
+    "chromium_arg": "--disable-blink-features=AutomationControlled"
+  },
+  "runtime": {
+    "job_name": "Vimeo Downloader",
+    "worker_name": "worker-01",
+    "worker_index": 1,
+    "worker_count": 1
+  },
+  "watchdog": {
+    "enabled": true,
+    "stall_alert_after_seconds": 1800,
+    "repeat_alert_every_seconds": 1800,
+    "heartbeat_every_seconds": 900
+  },
+  "resume": {
+    "enabled": true,
+    "state_file": "output/run/resume_state.json",
+    "skip_completed_files": true,
+    "resume_partial_downloads": true
+  },
+  "workers": {
+    "count": 2,
+    "stagger_start_seconds": 3
+  }
+}

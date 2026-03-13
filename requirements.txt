@@ -1,0 +1,18 @@
+# Vimeo video downloader dependencies
+
+# Python 3.13 compatibility
+setuptools>=70.0.0
+
+# Web scraping and automation
+selenium==4.15.2
+undetected-chromedriver==3.5.4
+seleniumbase==4.47.1
+
+# Vimeo API client
+PyVimeo==1.1.0
+
+# Progress bars and utilities
+tqdm==4.66.1
+
+# HTTP requests
+requests==2.31.0

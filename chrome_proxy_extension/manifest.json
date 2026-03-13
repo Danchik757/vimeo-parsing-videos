@@ -1,0 +1,17 @@
+{
+  "name": "Proxy Auth Extension",
+  "version": "1.0",
+  "manifest_version": 3,
+  "description": "Chrome extension for proxy authentication",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "proxy",
+    "webRequest",
+    "webRequestAuthProvider"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ]
+}
