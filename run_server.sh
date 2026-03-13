@@ -15,4 +15,4 @@ if ! command -v xvfb-run >/dev/null 2>&1; then
 fi
 
 source venv/bin/activate
-xvfb-run -a -s "-screen 0 1920x1080x24" python run_workers.py "$@"
+xvfb-run -a -s "-screen 0 1920x1080x24" python run_batches.py "$@"

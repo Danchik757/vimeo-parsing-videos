@@ -60,7 +60,9 @@
     "job_name": "Vimeo Downloader",
     "worker_name": "worker-01",
     "worker_index": 1,
-    "worker_count": 1
+    "worker_count": 1,
+    "batch_number": 0,
+    "batch_count": 0
   },
   "watchdog": {
     "enabled": true,
@@ -76,6 +78,22 @@
   },
   "workers": {
     "count": 2,
-    "stagger_start_seconds": 3
+    "stagger_start_seconds": 3,
+    "shared_media_dirs": false
+  },
+  "batches": {
+    "enabled": true,
+    "batch_size": 10000,
+    "auto_advance": true,
+    "reuse_existing_shards": true,
+    "stop_on_batch_error": true,
+    "max_batches": 0,
+    "shards_dir": "data_shards/generated_batches",
+    "runs_dir": "output/batches/runs",
+    "state_file": "output/batches/batch_state.json",
+    "manifest_file": "output/batches/batches_manifest.json",
+    "global_results_file": "output/batches/global_results_manifest.json",
+    "global_downloaded_file": "output/batches/global_downloaded_videos.json",
+    "global_summary_file": "output/batches/global_summary.json"
   }
 }

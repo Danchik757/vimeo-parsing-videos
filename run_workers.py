@@ -29,10 +29,15 @@ def shard_urls(urls, worker_count):
 def build_worker_config(master_config, worker_dir, shard_path, worker_index, worker_count):
     worker_name = f"worker-{worker_index:02d}"
     worker_config = json.loads(json.dumps(master_config))
+    shared_media_dirs = bool(master_config.get("workers", {}).get("shared_media_dirs", False))
 
     worker_config["files"]["source_json"] = str(shard_path)
-    worker_config["files"]["videos_dir"] = str(worker_dir / "videos")
-    worker_config["files"]["jsons_dir"] = str(worker_dir / "jsons")
+    if shared_media_dirs:
+        worker_config["files"]["videos_dir"] = master_config["files"]["videos_dir"]
+        worker_config["files"]["jsons_dir"] = master_config["files"]["jsons_dir"]
+    else:
+        worker_config["files"]["videos_dir"] = str(worker_dir / "videos")
+        worker_config["files"]["jsons_dir"] = str(worker_dir / "jsons")
     worker_config["files"]["logs_dir"] = str(worker_dir)
     worker_config["files"]["failed_downloads"] = str(worker_dir / "failed_downloads.json")
     worker_config["files"]["log_file"] = str(worker_dir / "download.log")
@@ -46,6 +51,8 @@ def build_worker_config(master_config, worker_dir, shard_path, worker_index, wor
 
     worker_config.setdefault("resume", {})
     worker_config["resume"]["state_file"] = str(worker_dir / "resume_state.json")
+    worker_config.setdefault("workers", {})
+    worker_config["workers"]["shared_media_dirs"] = shared_media_dirs
 
     return worker_name, worker_config
 
@@ -95,6 +102,10 @@ def main():
     coordinator_logger.info("Coordinator config: %s", master_config["_meta"]["config_path"])
     coordinator_logger.info("Worker count: %d", worker_count)
     coordinator_logger.info("Total URLs after test mode: %d", len(urls))
+    coordinator_logger.info(
+        "Shared media dirs: %s",
+        bool(workers_cfg.get("shared_media_dirs", False)),
+    )
 
     telegram = TelegramNotifier(
         master_config,

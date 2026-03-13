@@ -11,6 +11,9 @@ output/
 downloaded_files/
 need_parse.json
 need_parse_unique.json
+data_shards/generated_batches/
+data_shards/need_parse_unique_10000/
+data_shards/batches_smoke/
 
 # Logs
 *.log

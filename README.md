@@ -3,6 +3,8 @@
 > Актуальная инструкция для текущей рабочей версии: `SERVER_WORKERS_GUIDE.md`
 >
 > Snapshot старой single-worker версии до server/workers лежит в `WORKING_VERSION_GUIDE.md`
+>
+> Для full-run по `need_parse_unique.json` используй `run_batches.py` или `run_server.sh`.
 
 Автоматизированный инструмент для массового скачивания видео с Vimeo с поддержкой Telegram уведомлений, прокси и работы на серверах.
 
@@ -16,6 +18,8 @@
 - ✅ **Headless режим:** Работа на серверах без GUI
 - ✅ **Умный retry:** Автоматические повторы при ошибках
 - ✅ **IP blocking detection:** Детект блокировки и автоматическая остановка
+- ✅ **Batch mode:** Разбиение master list на батчи по 10,000 URL с автоматическим переходом
+- ✅ **Global registry:** Общий log уже обработанных и скачанных URL across all batches
 
 ## Быстрый старт
 

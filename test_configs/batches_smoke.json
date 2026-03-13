@@ -1,0 +1,87 @@
+{
+  "vimeo_api": {
+    "token": "YOUR_VIMEO_TOKEN",
+    "secret": "YOUR_VIMEO_SECRET",
+    "client_id": "YOUR_VIMEO_CLIENT_ID"
+  },
+  "proxy": {
+    "enabled": false,
+    "host": "YOUR_PROXY_HOST",
+    "port": "3128",
+    "username": "YOUR_PROXY_USERNAME",
+    "password": "YOUR_PROXY_PASSWORD"
+  },
+  "files": {
+    "source_json": "../testdata/workers_smoke_urls.json",
+    "videos_dir": "../output/batches_smoke/videos",
+    "jsons_dir": "../output/batches_smoke/jsons",
+    "logs_dir": "../output/batches_smoke/single_worker_unused",
+    "failed_downloads": "../output/batches_smoke/single_worker_unused/failed_downloads.json",
+    "log_file": "../output/batches_smoke/single_worker_unused/download.log",
+    "summary_file": "../output/batches_smoke/single_worker_unused/summary.json",
+    "results_file": "../output/batches_smoke/single_worker_unused/results_manifest.json"
+  },
+  "telegram": {
+    "enabled": false
+  },
+  "settings": {
+    "test_mode": false,
+    "test_limit": 4,
+    "retry_attempts": 3,
+    "retry_delay": 5,
+    "javascript_wait_time": 15,
+    "download_timeout": 600,
+    "connect_timeout": 30,
+    "download_chunk_size_kb": 1024,
+    "download_progress_log_seconds": 15
+  },
+  "browser": {
+    "uc": true,
+    "headless": true,
+    "xvfb": false,
+    "disable_csp": true,
+    "block_images": false,
+    "incognito": false,
+    "chromium_arg": "--disable-blink-features=AutomationControlled"
+  },
+  "runtime": {
+    "job_name": "Vimeo Downloader Batch Smoke",
+    "worker_name": "worker-01",
+    "worker_index": 1,
+    "worker_count": 1,
+    "batch_number": 0,
+    "batch_count": 0
+  },
+  "watchdog": {
+    "enabled": true,
+    "stall_alert_after_seconds": 1800,
+    "repeat_alert_every_seconds": 1800,
+    "heartbeat_every_seconds": 900
+  },
+  "resume": {
+    "enabled": true,
+    "state_file": "../output/batches_smoke/single_worker_unused/resume_state.json",
+    "skip_completed_files": true,
+    "resume_partial_downloads": true
+  },
+  "workers": {
+    "count": 2,
+    "stagger_start_seconds": 1,
+    "shared_media_dirs": true
+  },
+  "batches": {
+    "enabled": true,
+    "batch_size": 2,
+    "auto_advance": true,
+    "reuse_existing_shards": false,
+    "stop_on_batch_error": true,
+    "max_batches": 0,
+    "shards_dir": "../data_shards/batches_smoke",
+    "runs_dir": "../output/batches_smoke/runs",
+    "state_file": "../output/batches_smoke/batch_state.json",
+    "manifest_file": "../output/batches_smoke/batches_manifest.json",
+    "global_results_file": "../output/batches_smoke/global_results_manifest.json",
+    "global_downloaded_file": "../output/batches_smoke/global_downloaded_videos.json",
+    "global_summary_file": "../output/batches_smoke/global_summary.json"
+  }
+}

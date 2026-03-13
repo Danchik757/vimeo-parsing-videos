@@ -110,6 +110,8 @@ def load_config(config_path):
     runtime.setdefault("worker_name", "worker-01")
     runtime.setdefault("worker_index", 1)
     runtime.setdefault("worker_count", 1)
+    runtime.setdefault("batch_number", 0)
+    runtime.setdefault("batch_count", 0)
 
     watchdog = config.setdefault("watchdog", {})
     watchdog.setdefault("enabled", True)
@@ -125,6 +127,38 @@ def load_config(config_path):
         resume["state_file"] = str(resolve_path(config_dir, resume["state_file"]))
     else:
         resume["state_file"] = str(Path(files_cfg["logs_dir"]) / "resume_state.json")
+
+    workers = config.setdefault("workers", {})
+    workers.setdefault("count", 1)
+    workers.setdefault("stagger_start_seconds", 3)
+    workers.setdefault("shared_media_dirs", False)
+
+    batches = config.setdefault("batches", {})
+    batches.setdefault("enabled", False)
+    batches.setdefault("batch_size", 10000)
+    batches.setdefault("auto_advance", True)
+    batches.setdefault("reuse_existing_shards", True)
+    batches.setdefault("stop_on_batch_error", True)
+    batches.setdefault("max_batches", 0)
+    batches.setdefault("shards_dir", "data_shards/generated_batches")
+    batches.setdefault("runs_dir", "output/batches/runs")
+    batches.setdefault("state_file", "output/batches/batch_state.json")
+    batches.setdefault("manifest_file", "output/batches/batches_manifest.json")
+    batches.setdefault("global_results_file", "output/batches/global_results_manifest.json")
+    batches.setdefault("global_downloaded_file", "output/batches/global_downloaded_videos.json")
+    batches.setdefault("global_summary_file", "output/batches/global_summary.json")
+
+    for key in (
+        "shards_dir",
+        "runs_dir",
+        "state_file",
+        "manifest_file",
+        "global_results_file",
+        "global_downloaded_file",
+        "global_summary_file",
+    ):
+        if key in batches:
+            batches[key] = str(resolve_path(config_dir, batches[key]))
 
     return config
 
