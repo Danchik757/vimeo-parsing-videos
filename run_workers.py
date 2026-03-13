@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import math
 import subprocess
 import sys
 import time
@@ -73,6 +72,89 @@ def load_worker_results(worker_dir):
         return json.load(f)
 
 
+def summarize_worker_results(worker_dir, worker_name):
+    worker_results = load_worker_results(worker_dir)
+    if not worker_results:
+        return None
+
+    items = worker_results.get("items", [])
+    total = len(items)
+    downloaded = 0
+    skipped = 0
+    failed = 0
+    pending = 0
+
+    for item in items:
+        status = item.get("status")
+        if status == "downloaded":
+            downloaded += 1
+        elif status == "skipped":
+            skipped += 1
+        elif status == "failed":
+            failed += 1
+        else:
+            pending += 1
+
+    processed = downloaded + skipped + failed
+    return {
+        "worker_name": worker_name,
+        "total": total,
+        "processed": processed,
+        "downloaded": downloaded,
+        "skipped": skipped,
+        "failed": failed,
+        "pending": pending,
+        "updated_at": worker_results.get("updated_at"),
+    }
+
+
+def build_coordinator_progress_lines(processes, total_urls):
+    worker_summaries = []
+    totals = {
+        "processed": 0,
+        "downloaded": 0,
+        "skipped": 0,
+        "failed": 0,
+        "pending": 0,
+    }
+
+    for item in processes:
+        summary = summarize_worker_results(item["worker_dir"], item["worker_name"])
+        if summary is None:
+            continue
+        worker_summaries.append(summary)
+        totals["processed"] += summary["processed"]
+        totals["downloaded"] += summary["downloaded"]
+        totals["skipped"] += summary["skipped"]
+        totals["failed"] += summary["failed"]
+        totals["pending"] += summary["pending"]
+
+    progress_pct = (totals["processed"] / total_urls * 100) if total_urls else 0
+    lines = [
+        f"processed: <code>{totals['processed']}/{total_urls} ({progress_pct:.1f}%)</code>",
+        f"downloaded: <code>{totals['downloaded']}</code>",
+        f"skipped: <code>{totals['skipped']}</code>",
+        f"failed: <code>{totals['failed']}</code>",
+        f"pending: <code>{totals['pending']}</code>",
+    ]
+
+    for summary in worker_summaries:
+        lines.append(
+            " / ".join(
+                [
+                    f"{summary['worker_name']}",
+                    f"done <code>{summary['processed']}/{summary['total']}</code>",
+                    f"d <code>{summary['downloaded']}</code>",
+                    f"s <code>{summary['skipped']}</code>",
+                    f"f <code>{summary['failed']}</code>",
+                    f"p <code>{summary['pending']}</code>",
+                ]
+            )
+        )
+
+    return lines
+
+
 def main():
     args = parse_args()
     master_config = load_config(args.config)
@@ -120,6 +202,7 @@ def main():
             f"config: <code>{master_config['_meta']['config_path']}</code>",
         ],
     )
+    last_coordinator_progress_ts = 0.0
 
     processes = []
     stagger_seconds = int(workers_cfg.get("stagger_start_seconds", 3))
@@ -196,6 +279,15 @@ def main():
                         f"config: <code>{item['config_path']}</code>",
                     ],
                 )
+
+        progress_every_seconds = telegram.notify_coordinator_progress_every_seconds
+        now = time.time()
+        if progress_every_seconds > 0 and now - last_coordinator_progress_ts >= progress_every_seconds:
+            telegram.notify_custom(
+                "Coordinator progress",
+                build_coordinator_progress_lines(processes, len(urls)),
+            )
+            last_coordinator_progress_ts = now
 
     summaries = []
     for item in processes:

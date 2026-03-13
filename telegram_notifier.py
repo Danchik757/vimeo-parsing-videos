@@ -37,10 +37,17 @@ class TelegramNotifier:
 
         legacy_every_n = max(1, _int_or_default(telegram_cfg.get("notify_every_n_videos", 1), 1))
         self.notify_download_every_n = max(
-            1,
+            0,
             _int_or_default(
                 telegram_cfg.get("notify_download_every_n_successes", legacy_every_n),
                 legacy_every_n,
+            ),
+        )
+        self.notify_coordinator_progress_every_seconds = max(
+            0,
+            _int_or_default(
+                telegram_cfg.get("notify_coordinator_progress_every_seconds", 0),
+                0,
             ),
         )
         self.notify_skip_every_n = max(
@@ -65,6 +72,35 @@ class TelegramNotifier:
         self.notify_on_ip_block = telegram_cfg.get("notify_on_ip_block", True)
         self.notify_on_stall = telegram_cfg.get("notify_on_stall", True)
         self.notify_on_heartbeat = telegram_cfg.get("notify_on_heartbeat", True)
+        self.separator_before_worker_messages = telegram_cfg.get(
+            "separator_before_worker_messages",
+            False,
+        )
+        self.separator_text = str(
+            telegram_cfg.get(
+                "separator_text",
+                "------------------------------",
+            )
+        )
+        separator_types = telegram_cfg.get(
+            "separator_message_types",
+            [
+                "start",
+                "downloaded",
+                "skipped",
+                "error",
+                "api_error",
+                "ip_blocked",
+                "progress",
+                "stall",
+                "heartbeat",
+                "finish",
+                "finish_with_error",
+            ],
+        )
+        if not isinstance(separator_types, list):
+            separator_types = []
+        self.separator_message_types = {str(item) for item in separator_types}
 
         self.job_name = job_name or runtime_cfg.get("job_name") or "Vimeo Downloader"
         self.worker_name = worker_name or runtime_cfg.get("worker_name") or ""
@@ -125,10 +161,25 @@ class TelegramNotifier:
             f"time: <code>{_now()}</code>"
         )
 
+    def _should_send_separator(self, title):
+        if not self.separator_before_worker_messages:
+            return False
+        if not self.worker_name or self.worker_name == "coordinator":
+            return False
+        return title in self.separator_message_types
+
+    def _send_separator(self):
+        separator_line = html.escape(self.separator_text)
+        return self.send_message(f"<code>{separator_line}</code>")
+
     def notify_custom(self, title, lines, icon=None):
+        if self._should_send_separator(title):
+            self._send_separator()
         return self.send_message(self._compose_message(title, lines))
 
     def should_notify_download(self, downloaded_count):
+        if self.notify_download_every_n <= 0:
+            return False
         return downloaded_count > 0 and downloaded_count % self.notify_download_every_n == 0
 
     def should_notify_skip(self, processed_num):

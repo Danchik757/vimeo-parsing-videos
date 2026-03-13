@@ -36,6 +36,7 @@ __pycache__/
 # Configuration (contains credentials)
 config.json
 config.local.json
+config.*.local.json
 test_configs/*.local.json
 
 # Selenium
