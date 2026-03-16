@@ -65,6 +65,27 @@ class TelegramNotifier:
                 0,
             ),
         )
+        self.request_timeout_seconds = max(
+            5,
+            _int_or_default(
+                telegram_cfg.get("request_timeout_seconds", 30),
+                30,
+            ),
+        )
+        self.retry_attempts = max(
+            1,
+            _int_or_default(
+                telegram_cfg.get("retry_attempts", 4),
+                4,
+            ),
+        )
+        self.retry_delay_seconds = max(
+            0,
+            _int_or_default(
+                telegram_cfg.get("retry_delay_seconds", 3),
+                3,
+            ),
+        )
 
         self.notify_on_start = telegram_cfg.get("notify_on_start", True)
         self.notify_on_finish = telegram_cfg.get("notify_on_finish", True)
@@ -137,20 +158,40 @@ class TelegramNotifier:
             "disable_web_page_preview": True,
         }
 
-        try:
-            response = requests.post(url, json=payload, timeout=15)
-            if response.status_code == 200:
-                logger.debug("Telegram message sent: %s", text[:80])
-                return True
-            logger.error(
-                "Failed to send Telegram message: %s - %s",
-                response.status_code,
-                response.text,
-            )
-            return False
-        except Exception as exc:
-            logger.error("Error sending Telegram message: %s", exc)
-            return False
+        last_error = None
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                response = requests.post(
+                    url,
+                    json=payload,
+                    timeout=self.request_timeout_seconds,
+                )
+                if response.status_code == 200:
+                    logger.debug("Telegram message sent: %s", text[:80])
+                    return True
+                last_error = (
+                    f"status={response.status_code} body={response.text[:300]}"
+                )
+                logger.warning(
+                    "Telegram send attempt %d/%d failed: %s",
+                    attempt,
+                    self.retry_attempts,
+                    last_error,
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Telegram send attempt %d/%d error: %s",
+                    attempt,
+                    self.retry_attempts,
+                    exc,
+                )
+
+            if attempt < self.retry_attempts and self.retry_delay_seconds > 0:
+                time.sleep(self.retry_delay_seconds)
+
+        logger.error("Telegram message was not delivered after retries: %s", last_error)
+        return False
 
     def _compose_message(self, title, lines):
         body = "\n".join(lines)
