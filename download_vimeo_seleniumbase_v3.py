@@ -1711,7 +1711,8 @@ def main():
         "resume_source_signature": resume_state.get("source_signature"),
     }
     write_summary(config, summary)
-    telegram.notify_finish(summary)
+    telegram.notify_finish(summary, wait=True)
+    telegram.shutdown(timeout=10)
     logger.info("Summary saved to %s", config["files"]["summary_file"])
     logger.info("Script finished with exit code %d", exit_code)
     return exit_code

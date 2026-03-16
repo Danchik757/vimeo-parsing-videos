@@ -375,7 +375,9 @@ def main():
             f"summary: <code>{aggregate_summary_path}</code>",
             f"results: <code>{aggregate_results_manifest_path}</code>",
         ],
+        wait=True,
     )
+    telegram.shutdown(timeout=10)
     return exit_code
 
 

@@ -1,9 +1,12 @@
 """Telegram notifications for the Vimeo downloader."""
 
 import argparse
+import atexit
 import html
 import json
 import logging
+import queue
+import threading
 import time
 from datetime import datetime
 
@@ -126,6 +129,10 @@ class TelegramNotifier:
         self.job_name = job_name or runtime_cfg.get("job_name") or "Vimeo Downloader"
         self.worker_name = worker_name or runtime_cfg.get("worker_name") or ""
         self._last_progress_message_ts = 0.0
+        self._session = None
+        self._message_queue = None
+        self._sender_thread = None
+        self._shutdown_started = False
 
         if self.enabled and (not self.bot_token or not self.chat_id):
             logger.warning(
@@ -134,6 +141,15 @@ class TelegramNotifier:
             self.enabled = False
 
         if self.enabled:
+            self._session = requests.Session()
+            self._message_queue = queue.Queue()
+            self._sender_thread = threading.Thread(
+                target=self._sender_loop,
+                name=f"telegram-sender-{self.worker_name or 'main'}",
+                daemon=True,
+            )
+            self._sender_thread.start()
+            atexit.register(self.shutdown)
             logger.info(
                 "Telegram notifications enabled for %s (chat_id: %s)",
                 self.label,
@@ -146,7 +162,7 @@ class TelegramNotifier:
             return f"{self.job_name} | {self.worker_name}"
         return self.job_name
 
-    def send_message(self, text, parse_mode="HTML"):
+    def _deliver_message(self, text, parse_mode="HTML"):
         if not self.enabled:
             return False
 
@@ -161,7 +177,7 @@ class TelegramNotifier:
         last_error = None
         for attempt in range(1, self.retry_attempts + 1):
             try:
-                response = requests.post(
+                response = self._session.post(
                     url,
                     json=payload,
                     timeout=self.request_timeout_seconds,
@@ -193,6 +209,65 @@ class TelegramNotifier:
         logger.error("Telegram message was not delivered after retries: %s", last_error)
         return False
 
+    def _sender_loop(self):
+        while True:
+            item = self._message_queue.get()
+            if item is None:
+                self._message_queue.task_done()
+                break
+
+            text, parse_mode, done_event, result_holder = item
+            result = self._deliver_message(text, parse_mode=parse_mode)
+            if result_holder is not None:
+                result_holder["ok"] = result
+            if done_event is not None:
+                done_event.set()
+            self._message_queue.task_done()
+
+    def send_message(self, text, parse_mode="HTML", wait=False):
+        if not self.enabled:
+            return False
+
+        if self._sender_thread is None or not self._sender_thread.is_alive():
+            return self._deliver_message(text, parse_mode=parse_mode)
+
+        done_event = None
+        result_holder = None
+        if wait:
+            done_event = threading.Event()
+            result_holder = {"ok": False}
+
+        self._message_queue.put((text, parse_mode, done_event, result_holder))
+
+        if not wait:
+            return True
+
+        max_wait = (
+            self.retry_attempts * self.request_timeout_seconds
+            + max(0, self.retry_attempts - 1) * self.retry_delay_seconds
+            + 5
+        )
+        completed = done_event.wait(timeout=max_wait)
+        if not completed:
+            logger.error("Timed out waiting for Telegram sender thread to finish")
+            return False
+        return bool(result_holder["ok"])
+
+    def shutdown(self, timeout=None):
+        if not self.enabled:
+            return True
+        if self._sender_thread is None:
+            return True
+        if self._shutdown_started:
+            return not self._sender_thread.is_alive()
+
+        self._shutdown_started = True
+        self._message_queue.put(None)
+        self._sender_thread.join(timeout=timeout)
+        if not self._sender_thread.is_alive() and self._session is not None:
+            self._session.close()
+        return not self._sender_thread.is_alive()
+
     def _compose_message(self, title, lines):
         body = "\n".join(lines)
         return (
@@ -213,10 +288,10 @@ class TelegramNotifier:
         separator_line = html.escape(self.separator_text)
         return self.send_message(f"<code>{separator_line}</code>")
 
-    def notify_custom(self, title, lines, icon=None):
+    def notify_custom(self, title, lines, icon=None, wait=False):
         if self._should_send_separator(title):
             self._send_separator()
-        return self.send_message(self._compose_message(title, lines))
+        return self.send_message(self._compose_message(title, lines), wait=wait)
 
     def should_notify_download(self, downloaded_count):
         if self.notify_download_every_n <= 0:
@@ -335,7 +410,7 @@ class TelegramNotifier:
             lines.append(f"stage: <code>{html.escape(str(current_stage))}</code>")
         self.notify_custom("progress", lines)
 
-    def notify_finish(self, stats):
+    def notify_finish(self, stats, wait=False):
         if not self.enabled or not self.notify_on_finish:
             return
 
@@ -356,7 +431,7 @@ class TelegramNotifier:
         ]
         if fatal_error:
             lines.append(f"fatal: <code>{html.escape(str(fatal_error)[:350])}</code>")
-        self.notify_custom(title, lines)
+        self.notify_custom(title, lines, wait=wait)
 
     def notify_api_error(self, error_code, error_message):
         if not self.enabled or not self.notify_on_error:
@@ -423,13 +498,17 @@ def test_telegram_connection(config, worker_name=None, job_name=None):
         print("❌ Telegram notifications disabled in config")
         return False
 
-    return notifier.notify_custom(
+    try:
+        return notifier.notify_custom(
         "test_message",
         [
             "status: <code>ok</code>",
             "details: <code>telegram bot configuration works</code>",
         ],
-    )
+            wait=True,
+        )
+    finally:
+        notifier.shutdown(timeout=10)
 
 
 def main():
