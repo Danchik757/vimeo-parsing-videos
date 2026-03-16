@@ -6,14 +6,25 @@ import html
 import json
 import logging
 import queue
+import socket
 import threading
 import time
 from datetime import datetime
 
 import requests
+import urllib3.util.connection
 
 
 logger = logging.getLogger(__name__)
+_FORCED_IPV4 = False
+
+
+def _force_requests_ipv4():
+    global _FORCED_IPV4
+    if _FORCED_IPV4:
+        return
+    urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
+    _FORCED_IPV4 = True
 
 
 def _now():
@@ -89,6 +100,7 @@ class TelegramNotifier:
                 3,
             ),
         )
+        self.force_ipv4 = bool(telegram_cfg.get("force_ipv4", False))
 
         self.notify_on_start = telegram_cfg.get("notify_on_start", True)
         self.notify_on_finish = telegram_cfg.get("notify_on_finish", True)
@@ -141,6 +153,8 @@ class TelegramNotifier:
             self.enabled = False
 
         if self.enabled:
+            if self.force_ipv4:
+                _force_requests_ipv4()
             self._session = requests.Session()
             self._message_queue = queue.Queue()
             self._sender_thread = threading.Thread(

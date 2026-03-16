@@ -33,6 +33,7 @@
     "request_timeout_seconds": 30,
     "retry_attempts": 4,
     "retry_delay_seconds": 3,
+    "force_ipv4": false,
     "notify_on_start": true,
     "notify_on_finish": true,
     "notify_on_error": true,
