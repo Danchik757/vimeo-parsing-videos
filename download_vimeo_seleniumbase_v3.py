@@ -112,6 +112,7 @@ def load_config(config_path):
     runtime.setdefault("worker_count", 1)
     runtime.setdefault("batch_number", 0)
     runtime.setdefault("batch_count", 0)
+    runtime.setdefault("vimeo_authenticated_session", False)
 
     watchdog = config.setdefault("watchdog", {})
     watchdog.setdefault("enabled", True)
@@ -532,6 +533,60 @@ def detect_extension(download_link):
     return ""
 
 
+def is_original_quality(selected_quality, config=None):
+    if config is not None:
+        runtime = config.get("runtime", {})
+        if not bool(runtime.get("vimeo_authenticated_session", False)):
+            return False
+
+    if not selected_quality:
+        return None
+    haystack = str(selected_quality).lower()
+    return "original" in haystack or "source" in haystack
+
+
+def load_existing_download_metadata(metadata_path, config=None, logger=None):
+    if not metadata_path.exists():
+        return {
+            "selected_quality": None,
+            "download_source": None,
+            "is_original": False if config is not None else None,
+        }
+
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as exc:
+        if logger:
+            logger.warning("Failed to read existing metadata %s: %s", metadata_path, exc)
+        return {}
+
+    download = payload.setdefault("_download", {})
+    selected_quality = download.get("selected_quality")
+    download_source = download.get("source")
+    is_original = download.get("is_original")
+
+    if is_original is None:
+        is_original = is_original_quality(selected_quality, config=config)
+        download["is_original"] = is_original
+        try:
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            if logger:
+                logger.warning(
+                    "Failed to backfill is_original in metadata %s: %s",
+                    metadata_path,
+                    exc,
+                )
+
+    return {
+        "selected_quality": selected_quality,
+        "download_source": download_source,
+        "is_original": is_original,
+    }
+
+
 def download_video(
     sb,
     video_url,
@@ -551,6 +606,7 @@ def download_video(
         "filename": None,
         "download_source": None,
         "selected_quality": None,
+        "is_original": None,
         "download_link": None,
     }
 
@@ -564,6 +620,10 @@ def download_video(
                 api_download.get("text")
                 or api_download.get("quality")
                 or api_download.get("rendition")
+            )
+            result["is_original"] = is_original_quality(
+                result["selected_quality"],
+                config=config,
             )
             result["download_link"] = download_link
             logger.info(
@@ -661,6 +721,10 @@ def download_video(
             download_link = best_option["href"]
             result["download_source"] = "page"
             result["selected_quality"] = best_option.get("text")
+            result["is_original"] = is_original_quality(
+                result["selected_quality"],
+                config=config,
+            )
             result["download_link"] = download_link
             logger.info("Got download link")
 
@@ -694,6 +758,7 @@ def download_video(
                 "file_size_mb": round(file_size_mb, 3),
                 "source": result["download_source"],
                 "selected_quality": result["selected_quality"],
+                "is_original": result["is_original"],
                 "download_link": result["download_link"],
             },
             "vimeo_video": json_data,
@@ -784,6 +849,7 @@ def default_results_manifest(config, urls, source_signature):
                 "video_file": None,
                 "download_source": None,
                 "selected_quality": None,
+                "is_original": None,
                 "updated_at": None,
             }
         )
@@ -825,6 +891,9 @@ def load_results_manifest(config, urls, source_signature, logger):
     if not isinstance(items, list) or len(items) != len(urls):
         logger.warning("Results manifest items mismatch. Rebuilding %s", manifest_path)
         return default_manifest
+
+    for item in items:
+        item.setdefault("is_original", None)
 
     return loaded
 
@@ -1099,6 +1168,12 @@ def main():
                     if config["resume"]["skip_completed_files"]:
                         existing_file = find_existing_completed_file(video_dir, video_id)
                         if existing_file is not None:
+                            metadata_path = Path(json_dir) / f"{video_id}.json"
+                            existing_metadata = load_existing_download_metadata(
+                                metadata_path,
+                                config=config,
+                                logger=logger,
+                            )
                             successful_downloads += 1
                             runtime_state.touch("already downloaded", video_id)
                             runtime_state.update_counts(
@@ -1131,8 +1206,11 @@ def main():
                                 reason="file already existed before resume",
                                 filename=existing_file.name,
                                 file_size_mb=round(existing_file.stat().st_size / (1024 * 1024), 3),
-                                metadata_json=str(Path(json_dir) / f"{video_id}.json"),
+                                metadata_json=str(metadata_path),
                                 video_file=str(existing_file),
+                                download_source=existing_metadata.get("download_source"),
+                                selected_quality=existing_metadata.get("selected_quality"),
+                                is_original=existing_metadata.get("is_original"),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_progress(
@@ -1437,6 +1515,7 @@ def main():
                                 video_file=str(Path(video_dir) / result["filename"]),
                                 download_source=result.get("download_source"),
                                 selected_quality=result.get("selected_quality"),
+                                is_original=result.get("is_original"),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_video_downloaded(
@@ -1482,6 +1561,7 @@ def main():
                                 reason=error_message,
                                 download_source=result.get("download_source") if result else None,
                                 selected_quality=result.get("selected_quality") if result else None,
+                                is_original=result.get("is_original") if result else None,
                             )
                             save_results_manifest(config, results_manifest)
                             logger.error("Failed to download %s: %s", video_id, error_message)

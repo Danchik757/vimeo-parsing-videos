@@ -77,6 +77,7 @@
     "worker_name": "worker-01",
     "worker_index": 1,
     "worker_count": 1,
+    "vimeo_authenticated_session": false,
     "batch_number": 0,
     "batch_count": 0
   },
@@ -95,7 +96,19 @@
   "workers": {
     "count": 2,
     "stagger_start_seconds": 3,
-    "shared_media_dirs": false
+    "shared_media_dirs": false,
+    "api_pool": [
+      {
+        "client_id": "WORKER_01_VIMEO_CLIENT_ID",
+        "client_secret": "WORKER_01_VIMEO_CLIENT_SECRET",
+        "token": "WORKER_01_VIMEO_TOKEN"
+      },
+      {
+        "client_id": "WORKER_02_VIMEO_CLIENT_ID",
+        "client_secret": "WORKER_02_VIMEO_CLIENT_SECRET",
+        "token": "WORKER_02_VIMEO_TOKEN"
+      }
+    ]
   },
   "batches": {
     "enabled": true,

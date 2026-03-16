@@ -29,6 +29,7 @@ def build_worker_config(master_config, worker_dir, shard_path, worker_index, wor
     worker_name = f"worker-{worker_index:02d}"
     worker_config = json.loads(json.dumps(master_config))
     shared_media_dirs = bool(master_config.get("workers", {}).get("shared_media_dirs", False))
+    api_pool = master_config.get("workers", {}).get("api_pool") or []
 
     worker_config["files"]["source_json"] = str(shard_path)
     if shared_media_dirs:
@@ -47,11 +48,27 @@ def build_worker_config(master_config, worker_dir, shard_path, worker_index, wor
     worker_config["runtime"]["worker_name"] = worker_name
     worker_config["runtime"]["worker_index"] = worker_index
     worker_config["runtime"]["worker_count"] = worker_count
+    worker_config["runtime"]["vimeo_authenticated_session"] = bool(
+        worker_config.get("runtime", {}).get("vimeo_authenticated_session", False)
+    )
 
     worker_config.setdefault("resume", {})
     worker_config["resume"]["state_file"] = str(worker_dir / "resume_state.json")
     worker_config.setdefault("workers", {})
     worker_config["workers"]["shared_media_dirs"] = shared_media_dirs
+
+    if worker_index <= len(api_pool):
+        api_creds = api_pool[worker_index - 1] or {}
+        if all(api_creds.get(key) for key in ("client_id", "client_secret", "token")):
+            worker_config.setdefault("vimeo_api", {})
+            worker_config["vimeo_api"]["client_id"] = api_creds["client_id"]
+            worker_config["vimeo_api"]["secret"] = api_creds["client_secret"]
+            worker_config["vimeo_api"]["token"] = api_creds["token"]
+            worker_config["runtime"]["api_pool_slot"] = worker_index
+        else:
+            worker_config["runtime"]["api_pool_slot"] = None
+    else:
+        worker_config["runtime"]["api_pool_slot"] = None
 
     return worker_name, worker_config
 
