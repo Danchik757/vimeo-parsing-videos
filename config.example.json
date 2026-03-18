@@ -69,7 +69,8 @@
     "download_chunk_size_kb": 1024,
     "download_progress_log_seconds": 15,
     "download_only_original": false,
-    "download_interface": ""
+    "download_interface": "",
+    "download_retry_interface": ""
   },
   "browser": {
     "uc": true,

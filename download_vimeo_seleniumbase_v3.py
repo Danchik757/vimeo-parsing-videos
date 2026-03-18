@@ -98,6 +98,7 @@ def load_config(config_path):
     settings.setdefault("download_progress_log_seconds", 15)
     settings.setdefault("download_only_original", False)
     settings.setdefault("download_interface", "")
+    settings.setdefault("download_retry_interface", "")
 
     browser = config.setdefault("browser", {})
     browser.setdefault("uc", True)
@@ -499,13 +500,13 @@ def is_probable_ip_block(error_message):
     return any(indicator in message for indicator in indicators)
 
 
-def download_file_via_curl(url, local_filename, runtime_state, logger, config, video_id):
+def download_file_via_curl(url, local_filename, runtime_state, logger, config, video_id, interface_name=None):
     settings = config["settings"]
     resume = config["resume"]
     connect_timeout = int(settings.get("connect_timeout", 30))
     read_timeout = int(settings.get("download_timeout", 600))
     progress_log_every = int(settings.get("download_progress_log_seconds", 15))
-    download_interface = (settings.get("download_interface") or "").strip()
+    download_interface = (interface_name or settings.get("download_interface") or "").strip()
 
     if not download_interface:
         raise RuntimeError("settings.download_interface is required for curl-based downloads")
@@ -602,6 +603,7 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id):
     settings = config["settings"]
     resume = config["resume"]
     download_interface = (settings.get("download_interface") or "").strip()
+    download_retry_interface = (settings.get("download_retry_interface") or "").strip()
 
     if download_interface:
         return download_file_via_curl(
@@ -611,6 +613,7 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id):
             logger,
             config,
             video_id,
+            interface_name=download_interface,
         )
 
     chunk_size = int(settings.get("download_chunk_size_kb", 1024)) * 1024
@@ -643,84 +646,103 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id):
     content_length = 0
     last_log_ts = time.time()
 
-    while True:
-        with requests.get(
-            url,
-            stream=True,
-            timeout=(connect_timeout, read_timeout),
-            allow_redirects=True,
-            headers=request_headers,
-        ) as response:
-            if existing_size > 0 and response.status_code == 416:
-                total_size = parse_content_range_total(response.headers.get("Content-Range"))
-                if total_size and existing_size >= total_size:
-                    logger.info(
-                        "Partial file for %s is already complete, finalizing without re-download",
+    try:
+        while True:
+            with requests.get(
+                url,
+                stream=True,
+                timeout=(connect_timeout, read_timeout),
+                allow_redirects=True,
+                headers=request_headers,
+            ) as response:
+                if existing_size > 0 and response.status_code == 416:
+                    total_size = parse_content_range_total(response.headers.get("Content-Range"))
+                    if total_size and existing_size >= total_size:
+                        logger.info(
+                            "Partial file for %s is already complete, finalizing without re-download",
+                            video_id,
+                        )
+                        os.replace(part_path, local_path)
+                        return os.path.getsize(local_path) / (1024 * 1024)
+
+                    logger.warning(
+                        "Server rejected resume range for %s with 416, restarting download from scratch",
                         video_id,
                     )
-                    os.replace(part_path, local_path)
-                    return os.path.getsize(local_path) / (1024 * 1024)
+                    if part_path.exists():
+                        part_path.unlink()
+                    existing_size = 0
+                    bytes_written = 0
+                    request_headers = {}
+                    write_mode = "wb"
+                    last_log_ts = time.time()
+                    continue
 
-                logger.warning(
-                    "Server rejected resume range for %s with 416, restarting download from scratch",
-                    video_id,
-                )
-                if part_path.exists():
-                    part_path.unlink()
-                existing_size = 0
-                bytes_written = 0
-                request_headers = {}
-                write_mode = "wb"
-                last_log_ts = time.time()
-                continue
+                response.raise_for_status()
 
-            response.raise_for_status()
+                if existing_size > 0 and response.status_code != 206:
+                    logger.warning(
+                        "Server ignored resume range for %s (status=%s), restarting download from scratch",
+                        video_id,
+                        response.status_code,
+                    )
+                    if part_path.exists():
+                        part_path.unlink()
+                    existing_size = 0
+                    bytes_written = 0
+                    request_headers = {}
+                    write_mode = "wb"
+                    last_log_ts = time.time()
+                    continue
 
-            if existing_size > 0 and response.status_code != 206:
-                logger.warning(
-                    "Server ignored resume range for %s (status=%s), restarting download from scratch",
-                    video_id,
-                    response.status_code,
-                )
-                if part_path.exists():
-                    part_path.unlink()
-                existing_size = 0
-                bytes_written = 0
-                request_headers = {}
-                write_mode = "wb"
-                last_log_ts = time.time()
-                continue
+                response_length = int(response.headers.get("content-length", 0) or 0)
+                content_length = existing_size + response_length if existing_size else response_length
+                runtime_state.touch("downloading file", video_id)
 
-            response_length = int(response.headers.get("content-length", 0) or 0)
-            content_length = existing_size + response_length if existing_size else response_length
-            runtime_state.touch("downloading file", video_id)
+                with open(part_path, write_mode) as f:
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        bytes_written += len(chunk)
+                        runtime_state.touch("downloading file", video_id)
 
-            with open(part_path, write_mode) as f:
-                for chunk in response.iter_content(chunk_size=chunk_size):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    bytes_written += len(chunk)
-                    runtime_state.touch("downloading file", video_id)
-
-                    if time.time() - last_log_ts >= progress_log_every:
-                        if content_length:
-                            progress_pct = bytes_written / content_length * 100
-                            logger.info(
-                                "Download progress for %s: %.1f%% (%d / %d MB)",
-                                video_id,
-                                progress_pct,
-                                int(bytes_written / (1024 * 1024)),
-                                int(content_length / (1024 * 1024)),
-                            )
-                        else:
-                            logger.info(
-                                "Download progress for %s: %d MB",
-                                video_id,
-                                int(bytes_written / (1024 * 1024)),
-                            )
-                        last_log_ts = time.time()
-            break
+                        if time.time() - last_log_ts >= progress_log_every:
+                            if content_length:
+                                progress_pct = bytes_written / content_length * 100
+                                logger.info(
+                                    "Download progress for %s: %.1f%% (%d / %d MB)",
+                                    video_id,
+                                    progress_pct,
+                                    int(bytes_written / (1024 * 1024)),
+                                    int(content_length / (1024 * 1024)),
+                                )
+                            else:
+                                logger.info(
+                                    "Download progress for %s: %d MB",
+                                    video_id,
+                                    int(bytes_written / (1024 * 1024)),
+                                )
+                            last_log_ts = time.time()
+                break
+    except Exception as exc:
+        if download_retry_interface:
+            logger.warning(
+                "Direct download failed for %s (%s). Retrying via interface %s",
+                video_id,
+                exc,
+                download_retry_interface,
+            )
+            return download_file_via_curl(
+                url,
+                local_filename,
+                runtime_state,
+                logger,
+                config,
+                video_id,
+                interface_name=download_retry_interface,
+            )
+        raise
 
     os.replace(part_path, local_path)
     file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
