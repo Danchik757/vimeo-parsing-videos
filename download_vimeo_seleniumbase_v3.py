@@ -8,6 +8,8 @@ import os
 import platform
 import random
 import re
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -95,6 +97,7 @@ def load_config(config_path):
     settings.setdefault("download_chunk_size_kb", 1024)
     settings.setdefault("download_progress_log_seconds", 15)
     settings.setdefault("download_only_original", False)
+    settings.setdefault("download_interface", "")
 
     browser = config.setdefault("browser", {})
     browser.setdefault("uc", True)
@@ -496,9 +499,120 @@ def is_probable_ip_block(error_message):
     return any(indicator in message for indicator in indicators)
 
 
+def download_file_via_curl(url, local_filename, runtime_state, logger, config, video_id):
+    settings = config["settings"]
+    resume = config["resume"]
+    connect_timeout = int(settings.get("connect_timeout", 30))
+    read_timeout = int(settings.get("download_timeout", 600))
+    progress_log_every = int(settings.get("download_progress_log_seconds", 15))
+    download_interface = (settings.get("download_interface") or "").strip()
+
+    if not download_interface:
+        raise RuntimeError("settings.download_interface is required for curl-based downloads")
+
+    curl_binary = shutil.which("curl")
+    if not curl_binary:
+        raise RuntimeError("curl is required when settings.download_interface is set")
+
+    local_path = Path(local_filename)
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    part_path = local_path.with_suffix(local_path.suffix + ".part")
+
+    allow_resume = bool(resume.get("resume_partial_downloads", True))
+    existing_size = part_path.stat().st_size if part_path.exists() else 0
+    if existing_size and not allow_resume:
+        part_path.unlink()
+        existing_size = 0
+
+    cmd = [
+        curl_binary,
+        "--fail",
+        "--location",
+        "--silent",
+        "--show-error",
+        "--connect-timeout",
+        str(connect_timeout),
+        "--speed-time",
+        str(read_timeout),
+        "--speed-limit",
+        "1",
+        "--interface",
+        download_interface,
+        "--output",
+        str(part_path),
+    ]
+    if existing_size > 0:
+        cmd.extend(["-C", "-"])
+        logger.info(
+            "Resuming partial download for %s via curl from %.1f MB on interface %s",
+            video_id,
+            existing_size / (1024 * 1024),
+            download_interface,
+        )
+
+    cmd.append(url)
+    logger.info("Downloading %s via curl on interface %s", video_id, download_interface)
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    last_log_ts = time.time()
+    last_size = existing_size
+    while True:
+        return_code = process.poll()
+        current_size = part_path.stat().st_size if part_path.exists() else existing_size
+        runtime_state.touch("downloading file", video_id)
+
+        if time.time() - last_log_ts >= progress_log_every:
+            if current_size != last_size or current_size > 0:
+                logger.info(
+                    "Download progress for %s: %d MB",
+                    video_id,
+                    int(current_size / (1024 * 1024)),
+                )
+                last_size = current_size
+            last_log_ts = time.time()
+
+        if return_code is not None:
+            break
+        time.sleep(1)
+
+    stderr_output = ""
+    if process.stderr is not None:
+        stderr_output = process.stderr.read().strip()
+
+    if return_code != 0:
+        error_message = stderr_output.splitlines()[-1] if stderr_output else f"curl exited with {return_code}"
+        raise RuntimeError(error_message)
+
+    if not part_path.exists():
+        raise RuntimeError("curl completed but part file is missing")
+
+    os.replace(part_path, local_path)
+    file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
+    logger.info("Downloaded: %s (%.1f MB) via curl", local_path, file_size_mb)
+    return file_size_mb
+
+
 def download_file(url, local_filename, runtime_state, logger, config, video_id):
     settings = config["settings"]
     resume = config["resume"]
+    download_interface = (settings.get("download_interface") or "").strip()
+
+    if download_interface:
+        return download_file_via_curl(
+            url,
+            local_filename,
+            runtime_state,
+            logger,
+            config,
+            video_id,
+        )
+
     chunk_size = int(settings.get("download_chunk_size_kb", 1024)) * 1024
     connect_timeout = int(settings.get("connect_timeout", 30))
     read_timeout = int(settings.get("download_timeout", 600))

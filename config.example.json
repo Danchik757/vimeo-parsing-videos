@@ -68,7 +68,8 @@
     "connect_timeout": 30,
     "download_chunk_size_kb": 1024,
     "download_progress_log_seconds": 15,
-    "download_only_original": false
+    "download_only_original": false,
+    "download_interface": ""
   },
   "browser": {
     "uc": true,
