@@ -288,14 +288,15 @@ def main():
             coordinator_logger.info("%s finished with exit code %s", worker_name, return_code)
             if return_code != 0:
                 exit_code = 1
-                telegram.notify_custom(
-                    "Worker exited with error",
-                    [
-                        f"worker: <code>{worker_name}</code>",
-                        f"exit_code: {return_code}",
-                        f"config: <code>{item['config_path']}</code>",
-                    ],
-                )
+                if telegram.notify_on_error:
+                    telegram.notify_custom(
+                        "Worker exited with error",
+                        [
+                            f"worker: <code>{worker_name}</code>",
+                            f"exit_code: {return_code}",
+                            f"config: <code>{item['config_path']}</code>",
+                        ],
+                    )
 
         progress_every_seconds = telegram.notify_coordinator_progress_every_seconds
         now = time.time()

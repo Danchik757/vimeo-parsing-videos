@@ -99,6 +99,9 @@ def load_config(config_path):
     settings.setdefault("download_only_original", False)
     settings.setdefault("download_interface", "")
     settings.setdefault("download_retry_interface", "")
+    settings.setdefault("login_completion_timeout_seconds", 30)
+    settings.setdefault("login_retry_attempts", 3)
+    settings.setdefault("login_retry_delay_seconds", 10)
 
     browser = config.setdefault("browser", {})
     browser.setdefault("uc", True)
@@ -396,10 +399,22 @@ def is_login_page(current_url, title, page_context=None):
     return False
 
 
-def login_to_vimeo(sb, email, password, logger):
-    logger.info("Opening Vimeo login page")
-    sb.open("https://vimeo.com/log_in")
-    sb.sleep(3)
+def save_login_failure_artifact(sb, logger, config, attempt):
+    logs_dir = Path(config["files"]["logs_dir"])
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    html_path = logs_dir / f"login_failure_attempt_{attempt}.html"
+    try:
+        html_path.write_text(sb.get_page_source(), encoding="utf-8")
+        logger.warning("Saved login failure HTML to %s", html_path)
+    except Exception as exc:
+        logger.warning("Failed to save login failure HTML: %s", exc)
+
+
+def login_to_vimeo(sb, email, password, logger, config):
+    settings = config["settings"]
+    login_completion_timeout = int(settings.get("login_completion_timeout_seconds", 30))
+    login_retry_attempts = int(settings.get("login_retry_attempts", 3))
+    login_retry_delay_seconds = int(settings.get("login_retry_delay_seconds", 10))
 
     email_selectors = [
         "#email_login",
@@ -421,46 +436,84 @@ def login_to_vimeo(sb, email, password, logger):
         "button[aria-label*='Log in']",
     ]
 
-    for selector in email_selectors:
-        try:
-            sb.wait_for_element_visible(selector, timeout=10)
-            sb.clear(selector)
-            sb.type(selector, email)
-            break
-        except Exception:
-            continue
-    else:
-        raise RuntimeError("Email input not found on Vimeo login page")
+    for attempt in range(1, login_retry_attempts + 1):
+        logger.info("Opening Vimeo login page (attempt %d/%d)", attempt, login_retry_attempts)
+        sb.open("https://vimeo.com/log_in")
+        sb.sleep(3)
 
-    for selector in password_selectors:
-        try:
-            sb.clear(selector)
-            sb.type(selector, password)
-            break
-        except Exception:
-            continue
-    else:
-        raise RuntimeError("Password input not found on Vimeo login page")
+        for selector in email_selectors:
+            try:
+                sb.wait_for_element_visible(selector, timeout=10)
+                sb.clear(selector)
+                sb.type(selector, email)
+                break
+            except Exception:
+                continue
+        else:
+            raise RuntimeError("Email input not found on Vimeo login page")
 
-    for selector in submit_selectors:
-        try:
-            sb.click(selector)
-            break
-        except Exception:
-            continue
-    else:
-        raise RuntimeError("Login submit button not found on Vimeo login page")
+        for selector in password_selectors:
+            try:
+                sb.clear(selector)
+                sb.type(selector, password)
+                break
+            except Exception:
+                continue
+        else:
+            raise RuntimeError("Password input not found on Vimeo login page")
 
-    logger.info("Waiting for login to complete")
-    sb.sleep(8)
-    current_url = ""
-    try:
-        current_url = sb.get_current_url()
-    except Exception:
-        pass
-    if "log_in" in current_url:
+        for selector in submit_selectors:
+            try:
+                sb.click(selector)
+                break
+            except Exception:
+                continue
+        else:
+            raise RuntimeError("Login submit button not found on Vimeo login page")
+
+        logger.info(
+            "Waiting up to %ss for login to complete (attempt %d/%d)",
+            login_completion_timeout,
+            attempt,
+            login_retry_attempts,
+        )
+        deadline = time.time() + login_completion_timeout
+        while time.time() < deadline:
+            current_url = ""
+            page_title = ""
+            try:
+                current_url = sb.get_current_url()
+            except Exception:
+                pass
+            try:
+                page_title = sb.get_title()
+            except Exception:
+                pass
+
+            if not is_login_page(current_url, page_title):
+                logger.info("Logged in successfully")
+                return
+            time.sleep(2)
+
+        save_login_failure_artifact(sb, logger, config, attempt)
+        current_url = ""
+        try:
+            current_url = sb.get_current_url()
+        except Exception:
+            pass
+
+        if attempt < login_retry_attempts:
+            logger.warning(
+                "Login attempt %d/%d incomplete, still on %s. Retrying in %ss",
+                attempt,
+                login_retry_attempts,
+                current_url or "unknown url",
+                login_retry_delay_seconds,
+            )
+            sb.sleep(login_retry_delay_seconds)
+            continue
+
         raise RuntimeError(f"Login appears incomplete, still on {current_url}")
-    logger.info("Logged in successfully")
 
 
 def parse_content_range_total(header_value):
@@ -1302,7 +1355,7 @@ def download_video(
                     video_url,
                 )
                 runtime_state.touch("re-authenticating session", video_id)
-                login_to_vimeo(sb, login_email, login_password, logger)
+                login_to_vimeo(sb, login_email, login_password, logger, config)
                 result["session_relogin"] = True
                 sb.open(video_url)
 
@@ -1969,7 +2022,7 @@ def main():
                 logger.info("SeleniumBase browser started")
                 if bool(config["runtime"].get("vimeo_authenticated_session", False)):
                     runtime_state.touch("logging into vimeo")
-                    login_to_vimeo(sb, login_email, login_password, logger)
+                    login_to_vimeo(sb, login_email, login_password, logger, config)
 
                 for i, video_url in enumerate(urls[start_index:], start=start_index + 1):
                     video_id = extract_video_id(video_url)
