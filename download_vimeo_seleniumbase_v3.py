@@ -7,6 +7,7 @@ import logging
 import os
 import platform
 import random
+import re
 import threading
 import time
 from pathlib import Path
@@ -19,9 +20,10 @@ from selenium.webdriver.common.action_chains import ActionChains
 
 from telegram_notifier import TelegramNotifier
 from vimeo_cdp_helpers import (
+    _extract_download_options_from_scope,
+    choose_best_download_option,
     click_download_button,
     extract_best_api_download,
-    extract_best_modal_download,
 )
 
 
@@ -92,6 +94,7 @@ def load_config(config_path):
     settings.setdefault("connect_timeout", 30)
     settings.setdefault("download_chunk_size_kb", 1024)
     settings.setdefault("download_progress_log_seconds", 15)
+    settings.setdefault("download_only_original", False)
 
     browser = config.setdefault("browser", {})
     browser.setdefault("uc", True)
@@ -534,11 +537,6 @@ def detect_extension(download_link):
 
 
 def is_original_quality(selected_quality, config=None):
-    if config is not None:
-        runtime = config.get("runtime", {})
-        if not bool(runtime.get("vimeo_authenticated_session", False)):
-            return False
-
     if not selected_quality:
         return None
     haystack = str(selected_quality).lower()
@@ -587,13 +585,343 @@ def load_existing_download_metadata(metadata_path, config=None, logger=None):
     }
 
 
+def get_video_storage_dir(video_dir, video_id):
+    return Path(video_dir) / "downloaded" / str(video_id)
+
+
+def get_download_status_root(video_dir, status):
+    bucket = "downloaded" if status == "downloaded" else "not_downloaded"
+    return Path(video_dir) / bucket
+
+
+def get_video_metadata_path(video_dir, video_id, status="downloaded"):
+    storage_dir = get_download_status_root(video_dir, status) / str(video_id)
+    return storage_dir / f"{video_id}.json"
+
+
+def extract_canonical_video_id(video_id, json_data=None, result=None):
+    candidates = []
+
+    if isinstance(json_data, dict):
+        candidates.extend(
+            [
+                json_data.get("id"),
+                json_data.get("clip_id"),
+            ]
+        )
+        uri = json_data.get("uri")
+        if isinstance(uri, str):
+            candidates.append(uri.rstrip("/").split("/")[-1])
+        link = json_data.get("link")
+        if isinstance(link, str):
+            candidates.append(link.rstrip("/").split("/")[-1])
+
+    if isinstance(result, dict):
+        page_context = result.get("page_context") or {}
+        next_data = page_context.get("next_data") or {}
+        candidates.extend(
+            [
+                next_data.get("clip_id"),
+                ((next_data.get("clip") or {}).get("id")),
+            ]
+        )
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        candidate = str(candidate).strip()
+        if candidate.isdigit():
+            return candidate
+
+    return str(video_id)
+
+
+def normalize_download_option(option):
+    if not isinstance(option, dict):
+        return None
+    return {
+        "text": option.get("text"),
+        "href": option.get("href"),
+        "quality": option.get("quality"),
+        "rendition": option.get("rendition"),
+        "width": option.get("width"),
+        "height": option.get("height"),
+    }
+
+
+def normalize_download_options(options):
+    normalized = []
+    for option in options or []:
+        item = normalize_download_option(option)
+        if item is not None:
+            normalized.append(item)
+    return normalized
+
+
+def collect_modal_download_options(sb, timeout=12):
+    deadline = time.time() + timeout
+    modal_seen = False
+    last_options = []
+
+    while time.time() < deadline:
+        scope_element = None
+        for selector in ("section[aria-modal='true']", "[role='dialog'][aria-modal='true']"):
+            try:
+                scope_element = sb.wait_for_query_selector(selector, timeout=1)
+                modal_seen = True
+                break
+            except Exception:
+                continue
+
+        if scope_element is None and hasattr(sb, "cdp"):
+            try:
+                scope_element = sb.cdp.select("body", timeout=1)
+            except Exception:
+                scope_element = None
+
+        if scope_element is not None:
+            last_options = _extract_download_options_from_scope(scope_element)
+            if last_options:
+                return last_options
+        time.sleep(0.5)
+
+    if modal_seen:
+        return last_options
+    return []
+
+
+def extract_script_json_by_id(page_source, script_id):
+    pattern = re.compile(
+        rf'<script[^>]*id=["\']{re.escape(script_id)}["\'][^>]*>(.*?)</script>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(page_source or "")
+    if not match:
+        return None
+    raw_payload = match.group(1).strip()
+    if not raw_payload:
+        return None
+    try:
+        return json.loads(raw_payload)
+    except Exception:
+        return None
+
+
+def extract_meta_tags(page_source):
+    tags = {}
+    patterns = [
+        re.compile(
+            r'<meta[^>]+(?:property|name)=["\']([^"\']+)["\'][^>]+content=["\']([^"\']*)["\']',
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r'<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']([^"\']+)["\']',
+            re.IGNORECASE,
+        ),
+    ]
+
+    for pattern in patterns:
+        for match in pattern.finditer(page_source or ""):
+            if len(match.groups()) != 2:
+                continue
+            if pattern is patterns[0]:
+                key, value = match.group(1), match.group(2)
+            else:
+                value, key = match.group(1), match.group(2)
+            tags.setdefault(key, value)
+    return tags
+
+
+def extract_page_context_summary(page_source):
+    if not page_source:
+        return None
+
+    summary = {}
+
+    next_data = extract_script_json_by_id(page_source, "__NEXT_DATA__")
+    if isinstance(next_data, dict):
+        page_props = next_data.get("props", {}).get("pageProps", {})
+        clip = page_props.get("clip") or {}
+        page_metadata = page_props.get("pageMetadata") or {}
+        summary["next_data"] = {
+            "clip_id": page_props.get("clipId"),
+            "clip_hash": page_props.get("clipHash"),
+            "page_metadata": {
+                "clip_signature": page_metadata.get("clipSignature"),
+                "clip_thumbnail_url": page_metadata.get("clipThumbnailUrl"),
+                "should_have_robots_meta": page_metadata.get("shouldHaveRobotsMeta"),
+            },
+            "clip": {
+                "uri": clip.get("uri"),
+                "name": clip.get("name"),
+                "link": clip.get("link"),
+                "privacy": clip.get("privacy"),
+                "content_rating_class": clip.get("contentRatingClass"),
+                "created_time": clip.get("createdTime"),
+                "duration": clip.get("duration"),
+                "width": clip.get("width"),
+                "height": clip.get("height"),
+            },
+        }
+
+    viewer_bootstrap = extract_script_json_by_id(page_source, "viewer-bootstrap")
+    if isinstance(viewer_bootstrap, dict):
+        bootstrap_user = viewer_bootstrap.get("ablincolnConfig", {}).get("user", {})
+        summary["viewer_bootstrap"] = {
+            "logged_in": bootstrap_user.get("logged_in"),
+            "location": viewer_bootstrap.get("location"),
+            "api_url": viewer_bootstrap.get("apiUrl"),
+            "vimeo_https_url": viewer_bootstrap.get("vimeoHttpsUrl"),
+            "content_viewing_prefs": viewer_bootstrap.get("contentViewingPrefs"),
+            "is_turnstile_enabled": viewer_bootstrap.get("isTurnstileEnabled"),
+            "requires_age_verification": viewer_bootstrap.get("requiresAgeVerification"),
+            "requires_age_self_certification": viewer_bootstrap.get("requires_age_self_certification"),
+            "is_from_copyright_restricted_region": viewer_bootstrap.get(
+                "isFromCopyrightRestrictedRegion"
+            ),
+            "jwt_present": bool(viewer_bootstrap.get("jwt")),
+            "recaptcha_site_key_present": bool(viewer_bootstrap.get("recaptchaSiteKey")),
+            "turnstile_site_key_present": bool(viewer_bootstrap.get("turnstileSiteKey")),
+        }
+
+    meta_tags = extract_meta_tags(page_source)
+    if meta_tags:
+        summary["meta"] = {
+            "canonical_url": meta_tags.get("og:url"),
+            "player_url": meta_tags.get("og:video:secure_url") or meta_tags.get("twitter:player"),
+            "player_width": meta_tags.get("og:video:width") or meta_tags.get("twitter:player:width"),
+            "player_height": meta_tags.get("og:video:height") or meta_tags.get("twitter:player:height"),
+            "poster": meta_tags.get("og:image"),
+        }
+
+    return summary or None
+
+
+def build_api_probe(response_status_code, response_payload):
+    best_option = None
+    download_options_count = 0
+    privacy_download = None
+    api_has_download_link = False
+    if isinstance(response_payload, dict):
+        download_options = response_payload.get("download") or []
+        download_options_count = len(download_options)
+        privacy_download = response_payload.get("privacy", {}).get("download")
+        best_option = extract_best_api_download(response_payload)
+        api_has_download_link = bool(best_option)
+
+    return {
+        "status_code": response_status_code,
+        "privacy_download": privacy_download,
+        "download_options_count": download_options_count,
+        "has_download_link": api_has_download_link,
+        "best_option": normalize_download_option(best_option),
+    }
+
+
+def build_page_probe(result):
+    return {
+        "visited": result.get("page_visited", False),
+        "page_url": result.get("page_url"),
+        "page_title": result.get("page_title"),
+        "cloudflare_detected": result.get("cloudflare_detected", False),
+        "download_button_found": result.get("button_found"),
+        "download_link_found": result.get("download_link_found", False),
+        "available_options_count": result.get("available_options_count", 0),
+        "available_options": result.get("available_options") or [],
+        "best_option": normalize_download_option(result.get("page_best_option")),
+        "has_original_option": result.get("has_original_option"),
+        "error": result.get("probe_error"),
+        "context": result.get("page_context"),
+    }
+
+
+def build_metadata_payload(
+    config,
+    video_dir,
+    video_id,
+    video_url,
+    json_data,
+    api_probe,
+    result,
+    status,
+    reason,
+):
+    canonical_video_id = extract_canonical_video_id(video_id, json_data=json_data, result=result)
+    metadata_path = get_video_metadata_path(video_dir, canonical_video_id, status=status)
+    storage_dir = metadata_path.parent
+    storage_dir.mkdir(parents=True, exist_ok=True)
+
+    file_path = result.get("file_path")
+    filename = result.get("filename")
+    if not file_path and filename:
+        file_path = str(storage_dir / filename)
+
+    payload = {
+        "_saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "_video_id": canonical_video_id,
+        "_requested_video_id": str(video_id),
+        "_video_url": video_url,
+        "_download": {
+            "status": status,
+            "reason": reason,
+            "worker_name": config["runtime"]["worker_name"],
+            "browser_mode": browser_mode_label(config),
+            "download_only_original": bool(config["settings"].get("download_only_original", False)),
+            "downloadable": result.get("downloadable"),
+            "filename": filename,
+            "file_path": file_path,
+            "file_size_mb": round(result["file_size_mb"], 3) if result.get("file_size_mb") is not None else None,
+            "source": result.get("download_source"),
+            "selected_quality": result.get("selected_quality"),
+            "is_original": result.get("is_original"),
+            "download_link": result.get("download_link"),
+        },
+        "_api": api_probe,
+        "_page_probe": build_page_probe(result),
+        "_storage": {
+            "bucket": "downloaded" if status == "downloaded" else "not_downloaded",
+            "video_dir": str(storage_dir),
+            "metadata_path": str(metadata_path),
+            "per_video_directory": True,
+        },
+        "vimeo_video": json_data if isinstance(json_data, dict) else None,
+    }
+    return payload, metadata_path
+
+
+def save_video_metadata(
+    config,
+    video_dir,
+    video_id,
+    video_url,
+    json_data,
+    api_probe,
+    result,
+    status,
+    reason,
+):
+    payload, metadata_path = build_metadata_payload(
+        config,
+        video_dir,
+        video_id,
+        video_url,
+        json_data,
+        api_probe,
+        result,
+        status,
+        reason,
+    )
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return metadata_path
+
+
 def download_video(
     sb,
     video_url,
     video_id,
     json_data,
     video_dir,
-    json_dir,
     logger,
     config,
     runtime_state,
@@ -601,31 +929,67 @@ def download_video(
 ):
     result = {
         "success": False,
+        "skipped_by_policy": False,
         "error": None,
         "file_size_mb": None,
         "filename": None,
+        "downloadable": False,
+        "download_link_found": False,
         "download_source": None,
         "selected_quality": None,
         "is_original": None,
         "download_link": None,
+        "button_found": None,
+        "available_options_count": 0,
+        "available_options": [],
+        "api_best_option": None,
+        "page_best_option": None,
+        "has_original_option": None,
+        "probe_error": None,
+        "policy_reason": None,
+        "page_visited": False,
+        "page_url": None,
+        "page_title": None,
+        "page_context": None,
+        "cloudflare_detected": False,
+        "canonical_video_id": None,
+        "file_path": None,
     }
 
     try:
         api_download = extract_best_api_download(json_data)
+        result["api_best_option"] = normalize_download_option(api_download)
         runtime_state.touch("checking direct api download", video_id)
+        download_only_original = bool(config["settings"].get("download_only_original", False))
+        api_selected_quality = None
+        api_is_original = None
         if api_download:
-            download_link = api_download["href"]
-            result["download_source"] = "api"
-            result["selected_quality"] = (
+            api_selected_quality = (
                 api_download.get("text")
                 or api_download.get("quality")
                 or api_download.get("rendition")
             )
-            result["is_original"] = is_original_quality(
-                result["selected_quality"],
-                config=config,
-            )
-            result["download_link"] = download_link
+            api_is_original = is_original_quality(api_selected_quality, config=config)
+
+        api_non_original_fallback = bool(
+            api_download and download_only_original and api_is_original is not True
+        )
+        if api_download:
+            result["download_source"] = "api"
+            result["selected_quality"] = api_selected_quality
+            result["is_original"] = api_is_original
+            result["download_link"] = api_download.get("href")
+            result["download_link_found"] = bool(api_download.get("href"))
+            result["downloadable"] = True
+            if api_non_original_fallback:
+                result["policy_reason"] = "downloadable via api but best available option is not original"
+
+        use_api_download = bool(api_download)
+        if download_only_original and not api_is_original:
+            use_api_download = False
+
+        if use_api_download:
+            download_link = api_download["href"]
             logger.info(
                 "Using direct API download link for %s (%s)",
                 video_id,
@@ -637,12 +1001,27 @@ def download_video(
             runtime_state.touch("opening video page", video_id)
             logger.info("Opening %s", video_url)
             sb.open(video_url)
+            result["page_visited"] = True
 
             initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
             logger.info("Waiting %.1fs for page load...", initial_wait)
             sb.sleep(initial_wait)
 
+            try:
+                result["page_url"] = sb.get_current_url()
+            except Exception:
+                result["page_url"] = video_url
+            try:
+                result["page_title"] = sb.get_title()
+            except Exception:
+                result["page_title"] = None
+            try:
+                result["page_context"] = extract_page_context_summary(sb.get_page_source())
+            except Exception:
+                result["page_context"] = None
+
             if check_if_cloudflare_blocked(sb, logger):
+                result["cloudflare_detected"] = True
                 cloudflare_timeout = random.uniform(
                     CLOUDFLARE_TIMEOUT_MIN,
                     CLOUDFLARE_TIMEOUT_MAX,
@@ -691,7 +1070,21 @@ def download_video(
             runtime_state.touch("clicking download button", video_id)
             try:
                 click_download_button(sb, timeout=js_timeout, logger=logger)
+                result["button_found"] = True
             except Exception as exc:
+                result["button_found"] = False
+                result["probe_error"] = "Download button not found"
+                if api_non_original_fallback:
+                    result["skipped_by_policy"] = True
+                    result["policy_reason"] = (
+                        "downloadable via api but not original; page probe failed: "
+                        "Download button not found"
+                    )
+                    logger.info(
+                        "Page probe for %s did not find button, but API already confirmed non-original downloadability",
+                        video_id,
+                    )
+                    return result
                 result["error"] = "Download button not found"
                 logger.error("Download button not found for %s: %s", video_id, exc)
                 try:
@@ -707,14 +1100,34 @@ def download_video(
                 return result
 
             runtime_state.touch("extracting modal download option", video_id)
-            try:
-                best_option = extract_best_modal_download(
-                    sb,
-                    timeout=js_timeout,
-                    logger=logger,
+            options = collect_modal_download_options(sb, timeout=js_timeout)
+            result["available_options"] = normalize_download_options(options)
+            result["available_options_count"] = len(result["available_options"])
+            best_option = choose_best_download_option(options)
+            result["page_best_option"] = normalize_download_option(best_option)
+            result["has_original_option"] = any(
+                is_original_quality(option.get("text"), config=config)
+                for option in result["available_options"]
+            )
+
+            if not best_option:
+                result["probe_error"] = (
+                    "No download option found in modal"
+                    if result["available_options_count"] > 0
+                    else "Download modal not found"
                 )
-            except Exception as exc:
-                result["error"] = str(exc)
+                if api_non_original_fallback:
+                    result["skipped_by_policy"] = True
+                    result["policy_reason"] = (
+                        "downloadable via api but not original; page probe did not expose original "
+                        f"({result['probe_error']})"
+                    )
+                    logger.info(
+                        "Page probe for %s did not expose original; keeping API non-original metadata only",
+                        video_id,
+                    )
+                    return result
+                result["error"] = result["probe_error"]
                 logger.error(result["error"])
                 return result
 
@@ -726,11 +1139,26 @@ def download_video(
                 config=config,
             )
             result["download_link"] = download_link
+            result["download_link_found"] = True
+            result["downloadable"] = True
             logger.info("Got download link")
 
+        if download_only_original and result["is_original"] is not True:
+            result["skipped_by_policy"] = True
+            if not result.get("policy_reason"):
+                result["policy_reason"] = "downloadable but best available option is not original"
+            logger.info(
+                "Skipping download for %s because best available option is not original (%s)",
+                video_id,
+                result["selected_quality"] or "unknown quality",
+            )
+            return result
+
+        canonical_video_id = extract_canonical_video_id(video_id, json_data=json_data, result=result)
+        result["canonical_video_id"] = canonical_video_id
         ext = detect_extension(download_link)
-        filename = f"{video_id}{ext}"
-        local_path = Path(video_dir) / filename
+        filename = f"{canonical_video_id}{ext}"
+        local_path = get_video_storage_dir(video_dir, canonical_video_id) / filename
 
         runtime_state.touch("downloading file", video_id)
         logger.info("Starting download to %s", local_path)
@@ -743,33 +1171,10 @@ def download_video(
             video_id,
         )
 
-        runtime_state.touch("saving metadata", video_id)
-        Path(json_dir).mkdir(parents=True, exist_ok=True)
-        metadata_payload = {
-            "_saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "_video_id": video_id,
-            "_video_url": video_url,
-            "_download": {
-                "status": "downloaded",
-                "worker_name": config["runtime"]["worker_name"],
-                "browser_mode": browser_mode_label(config),
-                "filename": filename,
-                "file_path": str(local_path),
-                "file_size_mb": round(file_size_mb, 3),
-                "source": result["download_source"],
-                "selected_quality": result["selected_quality"],
-                "is_original": result["is_original"],
-                "download_link": result["download_link"],
-            },
-            "vimeo_video": json_data,
-        }
-        with open(Path(json_dir) / f"{video_id}.json", "w", encoding="utf-8") as f:
-            json.dump(metadata_payload, f, indent=2, ensure_ascii=False)
-        logger.info("Saved metadata for %s", video_id)
-
         result["success"] = True
         result["file_size_mb"] = file_size_mb
         result["filename"] = filename
+        result["file_path"] = str(local_path)
         logger.info("Successfully downloaded %s (%.1f MB)", video_id, file_size_mb)
 
     except Exception as exc:
@@ -850,6 +1255,12 @@ def default_results_manifest(config, urls, source_signature):
                 "download_source": None,
                 "selected_quality": None,
                 "is_original": None,
+                "downloadable": None,
+                "button_found": None,
+                "download_link_found": None,
+                "available_options_count": 0,
+                "video_folder": None,
+                "requested_video_id": extract_video_id(url),
                 "updated_at": None,
             }
         )
@@ -894,6 +1305,12 @@ def load_results_manifest(config, urls, source_signature, logger):
 
     for item in items:
         item.setdefault("is_original", None)
+        item.setdefault("downloadable", None)
+        item.setdefault("button_found", None)
+        item.setdefault("download_link_found", None)
+        item.setdefault("available_options_count", 0)
+        item.setdefault("video_folder", None)
+        item.setdefault("requested_video_id", item.get("video_id"))
 
     return loaded
 
@@ -1028,12 +1445,80 @@ def checkpoint_resume_state(
 
 def find_existing_completed_file(video_dir, video_id):
     video_dir = Path(video_dir)
-    for candidate in sorted(video_dir.glob(f"{video_id}*")):
-        if candidate.suffix == ".part":
-            continue
-        if candidate.is_file() and candidate.stat().st_size > 0:
-            return candidate
+    per_video_dir = get_video_storage_dir(video_dir, video_id)
+    search_roots = []
+    if per_video_dir.exists():
+        search_roots.append(per_video_dir)
+    search_roots.append(video_dir)
+
+    seen = set()
+    for root in search_roots:
+        pattern = f"{video_id}*"
+        for candidate in sorted(root.glob(pattern)):
+            candidate = candidate.resolve()
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.is_dir():
+                continue
+            if candidate.suffix in {".part", ".json"}:
+                continue
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
     return None
+
+
+def should_skip_existing_file(existing_file, existing_metadata, config):
+    if existing_file is None:
+        return False
+    if not bool(config["settings"].get("download_only_original", False)):
+        return True
+    return existing_metadata.get("is_original") is True
+
+
+def resolve_existing_metadata_path(video_dir, json_dir, video_id):
+    for status in ("downloaded", "not_downloaded"):
+        preferred = get_video_metadata_path(video_dir, video_id, status=status)
+        if preferred.exists():
+            return preferred
+    legacy = Path(json_dir) / f"{video_id}.json"
+    if legacy.exists():
+        return legacy
+    return get_video_metadata_path(video_dir, video_id, status="downloaded")
+
+
+def api_error_payload(response):
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
+def create_placeholder_result():
+    return {
+        "success": False,
+        "skipped_by_policy": False,
+        "error": None,
+        "file_size_mb": None,
+        "filename": None,
+        "downloadable": False,
+        "download_link_found": False,
+        "download_source": None,
+        "selected_quality": None,
+        "is_original": None,
+        "download_link": None,
+        "button_found": None,
+        "available_options_count": 0,
+        "available_options": [],
+        "api_best_option": None,
+        "page_best_option": None,
+        "has_original_option": None,
+        "page_visited": False,
+        "page_url": None,
+        "page_title": None,
+        "page_context": None,
+        "cloudflare_detected": False,
+    }
 
 
 def load_existing_failed_urls(config, logger, should_resume):
@@ -1168,68 +1653,77 @@ def main():
                     if config["resume"]["skip_completed_files"]:
                         existing_file = find_existing_completed_file(video_dir, video_id)
                         if existing_file is not None:
-                            metadata_path = Path(json_dir) / f"{video_id}.json"
+                            metadata_path = resolve_existing_metadata_path(video_dir, json_dir, video_id)
                             existing_metadata = load_existing_download_metadata(
                                 metadata_path,
                                 config=config,
                                 logger=logger,
                             )
-                            successful_downloads += 1
-                            runtime_state.touch("already downloaded", video_id)
-                            runtime_state.update_counts(
-                                i,
-                                successful_downloads,
-                                skipped_videos,
-                                failed_videos,
-                            )
-                            logger.info(
-                                "Skipping %s because completed file already exists: %s",
-                                video_id,
-                                existing_file,
-                            )
-                            checkpoint_resume_state(
-                                config,
-                                resume_state,
-                                i,
-                                successful_downloads,
-                                skipped_videos,
-                                failed_videos,
-                                video_id,
-                                "already_downloaded",
-                                len(urls),
-                                source_signature,
-                            )
-                            update_results_manifest(
-                                results_manifest,
-                                i,
-                                status="downloaded",
-                                reason="file already existed before resume",
-                                filename=existing_file.name,
-                                file_size_mb=round(existing_file.stat().st_size / (1024 * 1024), 3),
-                                metadata_json=str(metadata_path),
-                                video_file=str(existing_file),
-                                download_source=existing_metadata.get("download_source"),
-                                selected_quality=existing_metadata.get("selected_quality"),
-                                is_original=existing_metadata.get("is_original"),
-                            )
-                            save_results_manifest(config, results_manifest)
-                            telegram.notify_progress(
-                                i,
-                                len(urls),
-                                successful_downloads,
-                                skipped_videos,
-                                failed_videos,
-                                current_video_id=video_id,
-                                current_stage="already downloaded",
-                            )
-                            if i < len(urls):
-                                delay = random.uniform(
-                                    MIN_DELAY_BETWEEN_VIDEOS,
-                                    MAX_DELAY_BETWEEN_VIDEOS,
+                            if not should_skip_existing_file(existing_file, existing_metadata, config):
+                                logger.info(
+                                    "Existing file for %s is not considered complete under original-only policy; reprocessing",
+                                    video_id,
                                 )
-                                logger.info("Delay before next video: %.1fs", delay)
-                                time.sleep(delay)
-                            continue
+                            else:
+                                successful_downloads += 1
+                                runtime_state.touch("already downloaded", video_id)
+                                runtime_state.update_counts(
+                                    i,
+                                    successful_downloads,
+                                    skipped_videos,
+                                    failed_videos,
+                                )
+                                logger.info(
+                                    "Skipping %s because completed file already exists: %s",
+                                    video_id,
+                                    existing_file,
+                                )
+                                checkpoint_resume_state(
+                                    config,
+                                    resume_state,
+                                    i,
+                                    successful_downloads,
+                                    skipped_videos,
+                                    failed_videos,
+                                    video_id,
+                                    "already_downloaded",
+                                    len(urls),
+                                    source_signature,
+                                )
+                                update_results_manifest(
+                                    results_manifest,
+                                    i,
+                                    status="downloaded",
+                                    reason="file already existed before resume",
+                                    filename=existing_file.name,
+                                    file_size_mb=round(existing_file.stat().st_size / (1024 * 1024), 3),
+                                    metadata_json=str(metadata_path),
+                                    video_file=str(existing_file),
+                                    download_source=existing_metadata.get("download_source"),
+                                    selected_quality=existing_metadata.get("selected_quality"),
+                                    is_original=existing_metadata.get("is_original"),
+                                    downloadable=True,
+                                    download_link_found=True,
+                                    video_folder=str(existing_file.parent),
+                                )
+                                save_results_manifest(config, results_manifest)
+                                telegram.notify_progress(
+                                    i,
+                                    len(urls),
+                                    successful_downloads,
+                                    skipped_videos,
+                                    failed_videos,
+                                    current_video_id=video_id,
+                                    current_stage="already downloaded",
+                                )
+                                if i < len(urls):
+                                    delay = random.uniform(
+                                        MIN_DELAY_BETWEEN_VIDEOS,
+                                        MAX_DELAY_BETWEEN_VIDEOS,
+                                    )
+                                    logger.info("Delay before next video: %.1fs", delay)
+                                    time.sleep(delay)
+                                continue
 
                     runtime_state.touch("api check", video_id)
                     logger.info("\n%s", "=" * 80)
@@ -1240,15 +1734,30 @@ def main():
                     try:
                         logger.info("Checking video %s via API...", video_id)
                         response = client.get(f"https://api.vimeo.com/videos/{video_id}")
+                        api_payload = api_error_payload(response)
+                        api_probe = build_api_probe(response.status_code, api_payload)
+                        result = create_placeholder_result()
 
                         if response.status_code == 401:
                             fatal_error = "API Authentication error (401) - invalid token"
                             logger.error(fatal_error)
+                            metadata_path = save_video_metadata(
+                                config,
+                                video_dir,
+                                video_id,
+                                video_url,
+                                None,
+                                api_probe,
+                                result,
+                                "failed",
+                                "fatal_api_401 invalid token",
+                            )
                             update_results_manifest(
                                 results_manifest,
                                 i,
                                 status="failed",
                                 reason="fatal_api_401 invalid token",
+                                metadata_json=str(metadata_path),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_api_error(401, "Invalid API token")
@@ -1258,11 +1767,23 @@ def main():
                         if response.status_code == 429:
                             fatal_error = "API rate limit exceeded (429)"
                             logger.error(fatal_error)
+                            metadata_path = save_video_metadata(
+                                config,
+                                video_dir,
+                                video_id,
+                                video_url,
+                                None,
+                                api_probe,
+                                result,
+                                "failed",
+                                "fatal_api_429 rate limit exceeded",
+                            )
                             update_results_manifest(
                                 results_manifest,
                                 i,
                                 status="failed",
                                 reason="fatal_api_429 rate limit exceeded",
+                                metadata_json=str(metadata_path),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_ip_blocked(
@@ -1276,7 +1797,7 @@ def main():
                         if response.status_code == 403:
                             reason = "403 API error"
                             try:
-                                data = response.json()
+                                data = api_payload or {}
                                 error_code = data.get("error_code")
                                 error_msg = data.get("error", "Unknown error")
                                 if error_code == 3410:
@@ -1314,11 +1835,23 @@ def main():
                                 len(urls),
                                 source_signature,
                             )
+                            metadata_path = save_video_metadata(
+                                config,
+                                video_dir,
+                                video_id,
+                                video_url,
+                                None,
+                                api_probe,
+                                result,
+                                "skipped",
+                                reason,
+                            )
                             update_results_manifest(
                                 results_manifest,
                                 i,
                                 status="skipped",
                                 reason=reason,
+                                metadata_json=str(metadata_path),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_progress(
@@ -1360,11 +1893,23 @@ def main():
                                 len(urls),
                                 source_signature,
                             )
+                            metadata_path = save_video_metadata(
+                                config,
+                                video_dir,
+                                video_id,
+                                video_url,
+                                None,
+                                api_probe,
+                                result,
+                                "skipped",
+                                "404 not found",
+                            )
                             update_results_manifest(
                                 results_manifest,
                                 i,
                                 status="skipped",
                                 reason="404 not found",
+                                metadata_json=str(metadata_path),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_progress(
@@ -1385,7 +1930,7 @@ def main():
                                 time.sleep(delay)
                             continue
 
-                        json_data = response.json()
+                        json_data = api_payload or {}
                         owner_allows_download = json_data.get("privacy", {}).get("download")
                         api_has_download_link = bool(extract_best_api_download(json_data))
 
@@ -1413,11 +1958,24 @@ def main():
                                 len(urls),
                                 source_signature,
                             )
+                            metadata_path = save_video_metadata(
+                                config,
+                                video_dir,
+                                video_id,
+                                video_url,
+                                json_data,
+                                api_probe,
+                                result,
+                                "skipped",
+                                "privacy.download=false and no API download links",
+                            )
                             update_results_manifest(
                                 results_manifest,
                                 i,
                                 status="skipped",
                                 reason="privacy.download=false and no API download links",
+                                metadata_json=str(metadata_path),
+                                downloadable=False,
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_progress(
@@ -1465,7 +2023,6 @@ def main():
                                 video_id,
                                 json_data,
                                 video_dir,
-                                json_dir,
                                 logger,
                                 config,
                                 runtime_state,
@@ -1486,6 +2043,17 @@ def main():
 
                         if result and result["success"]:
                             successful_downloads += 1
+                            metadata_path = save_video_metadata(
+                                config,
+                                video_dir,
+                                video_id,
+                                video_url,
+                                json_data,
+                                api_probe,
+                                result,
+                                "downloaded",
+                                "downloaded successfully",
+                            )
                             runtime_state.update_counts(
                                 i,
                                 successful_downloads,
@@ -1511,11 +2079,17 @@ def main():
                                 reason="downloaded successfully",
                                 filename=result["filename"],
                                 file_size_mb=round(result["file_size_mb"], 3),
-                                metadata_json=str(Path(json_dir) / f"{video_id}.json"),
-                                video_file=str(Path(video_dir) / result["filename"]),
+                                metadata_json=str(metadata_path),
+                                video_id=result.get("canonical_video_id") or video_id,
+                                video_file=result.get("file_path"),
                                 download_source=result.get("download_source"),
                                 selected_quality=result.get("selected_quality"),
                                 is_original=result.get("is_original"),
+                                downloadable=result.get("downloadable"),
+                                button_found=result.get("button_found"),
+                                download_link_found=result.get("download_link_found"),
+                                available_options_count=result.get("available_options_count"),
+                                video_folder=str(Path(metadata_path).parent),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_video_downloaded(
@@ -1526,6 +2100,67 @@ def main():
                                 len(urls),
                                 successful_downloads,
                             )
+                        elif result and result.get("skipped_by_policy"):
+                            skipped_videos += 1
+                            reason = (
+                                result.get("policy_reason")
+                                or "downloadable but not original (skipped by policy)"
+                            )
+                            metadata_path = save_video_metadata(
+                                config,
+                                video_dir,
+                                video_id,
+                                video_url,
+                                json_data,
+                                api_probe,
+                                result,
+                                "skipped",
+                                reason,
+                            )
+                            runtime_state.update_counts(
+                                i,
+                                successful_downloads,
+                                skipped_videos,
+                                failed_videos,
+                            )
+                            checkpoint_resume_state(
+                                config,
+                                resume_state,
+                                i,
+                                successful_downloads,
+                                skipped_videos,
+                                failed_videos,
+                                video_id,
+                                "skipped_non_original_policy",
+                                len(urls),
+                                source_signature,
+                            )
+                            update_results_manifest(
+                                results_manifest,
+                                i,
+                                status="skipped",
+                                reason=reason,
+                                metadata_json=str(metadata_path),
+                                video_id=extract_canonical_video_id(video_id, json_data=json_data, result=result),
+                                download_source=result.get("download_source"),
+                                selected_quality=result.get("selected_quality"),
+                                is_original=result.get("is_original"),
+                                downloadable=result.get("downloadable"),
+                                button_found=result.get("button_found"),
+                                download_link_found=result.get("download_link_found"),
+                                available_options_count=result.get("available_options_count"),
+                                video_folder=str(Path(metadata_path).parent),
+                            )
+                            save_results_manifest(config, results_manifest)
+                            telegram.notify_progress(
+                                i,
+                                len(urls),
+                                successful_downloads,
+                                skipped_videos,
+                                failed_videos,
+                                current_video_id=video_id,
+                                current_stage="non-original skip",
+                            )
                         else:
                             failed_videos += 1
                             error_message = result["error"] if result else "Unknown error"
@@ -1535,6 +2170,17 @@ def main():
                                     "error": error_message,
                                     "stage": "download",
                                 }
+                            )
+                            metadata_path = save_video_metadata(
+                                config,
+                                video_dir,
+                                video_id,
+                                video_url,
+                                json_data,
+                                api_probe,
+                                result or create_placeholder_result(),
+                                "failed",
+                                error_message,
                             )
                             runtime_state.update_counts(
                                 i,
@@ -1559,9 +2205,16 @@ def main():
                                 i,
                                 status="failed",
                                 reason=error_message,
+                                metadata_json=str(metadata_path),
+                                video_id=extract_canonical_video_id(video_id, json_data=json_data, result=result),
                                 download_source=result.get("download_source") if result else None,
                                 selected_quality=result.get("selected_quality") if result else None,
                                 is_original=result.get("is_original") if result else None,
+                                downloadable=result.get("downloadable") if result else None,
+                                button_found=result.get("button_found") if result else None,
+                                download_link_found=result.get("download_link_found") if result else None,
+                                available_options_count=result.get("available_options_count") if result else 0,
+                                video_folder=str(Path(metadata_path).parent),
                             )
                             save_results_manifest(config, results_manifest)
                             logger.error("Failed to download %s: %s", video_id, error_message)
@@ -1605,6 +2258,24 @@ def main():
                                 "stage": "api_check",
                             }
                         )
+                        result = create_placeholder_result()
+                        metadata_path = save_video_metadata(
+                            config,
+                            video_dir,
+                            video_id,
+                            video_url,
+                            None,
+                            {
+                                "status_code": None,
+                                "privacy_download": None,
+                                "download_options_count": None,
+                                "has_download_link": None,
+                                "best_option": None,
+                            },
+                            result,
+                            "failed",
+                            str(exc),
+                        )
                         runtime_state.update_counts(
                             i,
                             successful_downloads,
@@ -1628,6 +2299,8 @@ def main():
                             i,
                             status="failed",
                             reason=str(exc),
+                            metadata_json=str(metadata_path),
+                            video_folder=str(Path(metadata_path).parent),
                         )
                         save_results_manifest(config, results_manifest)
                         logger.error("Unexpected error processing %s: %s", video_id, exc)
@@ -1673,7 +2346,7 @@ def main():
     logger.info("DOWNLOAD PROCESS COMPLETED")
     logger.info("%s", "=" * 80)
     logger.info("Successfully downloaded: %d", successful_downloads)
-    logger.info("Skipped (privacy/paid): %d", skipped_videos)
+    logger.info("Skipped / not downloaded by policy: %d", skipped_videos)
     logger.info("Failed: %d", failed_videos)
     logger.info("Total processed: %d", total_processed)
     logger.info("%s\n", "=" * 80)
@@ -1704,6 +2377,7 @@ def main():
         "jsons_dir": config["files"]["jsons_dir"],
         "failed_downloads": config["files"]["failed_downloads"],
         "results_file": config["files"]["results_file"],
+        "per_video_directory_storage": True,
         "resume_enabled": config["resume"]["enabled"],
         "resume_state_file": config["resume"]["state_file"],
         "resume_next_index": resume_state["next_index"],

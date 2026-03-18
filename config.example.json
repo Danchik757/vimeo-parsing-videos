@@ -25,6 +25,8 @@
     "enabled": true,
     "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
     "chat_id": "YOUR_TELEGRAM_CHAT_ID",
+    "api_base_url": "https://api.telegram.org",
+    "source_address": "",
     "notify_download_every_n_successes": 0,
     "notify_skip_every_n_processed": 0,
     "notify_progress_every_n_processed": 0,
@@ -65,7 +67,8 @@
     "download_timeout": 600,
     "connect_timeout": 30,
     "download_chunk_size_kb": 1024,
-    "download_progress_log_seconds": 15
+    "download_progress_log_seconds": 15,
+    "download_only_original": false
   },
   "browser": {
     "uc": true,

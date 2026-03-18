@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 
 import requests
+from requests.adapters import HTTPAdapter
 import urllib3.util.connection
 
 
@@ -38,6 +39,24 @@ def _int_or_default(value, default):
         return default
 
 
+class SourceAddressAdapter(HTTPAdapter):
+    """Bind Telegram HTTP sockets to a specific local source IP."""
+
+    def __init__(self, source_address=None, **kwargs):
+        self.source_address = source_address
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        if self.source_address:
+            pool_kwargs["source_address"] = (self.source_address, 0)
+        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        if self.source_address:
+            proxy_kwargs["source_address"] = (self.source_address, 0)
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+
 class TelegramNotifier:
     """Send progress and alert notifications via Telegram Bot API."""
 
@@ -48,6 +67,10 @@ class TelegramNotifier:
         self.enabled = telegram_cfg.get("enabled", False)
         self.bot_token = telegram_cfg.get("bot_token", "")
         self.chat_id = telegram_cfg.get("chat_id", "")
+        self.api_base_url = str(
+            telegram_cfg.get("api_base_url", "https://api.telegram.org")
+        ).rstrip("/")
+        self.source_address = str(telegram_cfg.get("source_address", "")).strip() or None
 
         legacy_every_n = max(1, _int_or_default(telegram_cfg.get("notify_every_n_videos", 1), 1))
         self.notify_download_every_n = max(
@@ -156,6 +179,10 @@ class TelegramNotifier:
             if self.force_ipv4:
                 _force_requests_ipv4()
             self._session = requests.Session()
+            if self.source_address:
+                adapter = SourceAddressAdapter(source_address=self.source_address)
+                self._session.mount("https://", adapter)
+                self._session.mount("http://", adapter)
             self._message_queue = queue.Queue()
             self._sender_thread = threading.Thread(
                 target=self._sender_loop,
@@ -180,7 +207,7 @@ class TelegramNotifier:
         if not self.enabled:
             return False
 
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        url = f"{self.api_base_url}/bot{self.bot_token}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
             "text": text,
