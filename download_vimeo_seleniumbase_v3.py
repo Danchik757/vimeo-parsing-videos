@@ -677,14 +677,25 @@ def get_video_storage_dir(video_dir, video_id):
     return Path(video_dir) / "downloaded" / str(video_id)
 
 
-def get_download_status_root(video_dir, status):
-    bucket = "downloaded" if status == "downloaded" else "not_downloaded"
-    return Path(video_dir) / bucket
+def get_metadata_bucket(status, result=None):
+    result = result or {}
+    if status == "downloaded":
+        return "downloaded"
+    if result.get("downloadable") or result.get("download_link_found"):
+        return "not_downloaded"
+    return "no_links"
 
 
-def get_video_metadata_path(video_dir, video_id, status="downloaded"):
-    storage_dir = get_download_status_root(video_dir, status) / str(video_id)
-    return storage_dir / f"{video_id}.json"
+def get_download_status_root(video_dir, status, result=None):
+    return Path(video_dir) / get_metadata_bucket(status, result=result)
+
+
+def get_video_metadata_path(video_dir, video_id, status="downloaded", result=None):
+    bucket = get_metadata_bucket(status, result=result)
+    if bucket == "downloaded":
+        storage_dir = Path(video_dir) / bucket / str(video_id)
+        return storage_dir / f"{video_id}.json"
+    return Path(video_dir) / bucket / f"{video_id}.json"
 
 
 def extract_canonical_video_id(video_id, json_data=None, result=None):
@@ -744,6 +755,32 @@ def normalize_download_options(options):
         if item is not None:
             normalized.append(item)
     return normalized
+
+
+def summarize_vimeo_video(json_data):
+    if not isinstance(json_data, dict):
+        return None
+
+    user = json_data.get("user") or {}
+    summary = {
+        "id": json_data.get("id"),
+        "uri": json_data.get("uri"),
+        "name": json_data.get("name"),
+        "link": json_data.get("link"),
+        "created_time": json_data.get("created_time"),
+        "duration": json_data.get("duration"),
+        "width": json_data.get("width"),
+        "height": json_data.get("height"),
+        "privacy": json_data.get("privacy"),
+        "license": json_data.get("license"),
+        "status": json_data.get("status"),
+        "user": {
+            "uri": user.get("uri"),
+            "name": user.get("name"),
+            "link": user.get("link"),
+        } if user else None,
+    }
+    return summary
 
 
 def collect_modal_download_options(sb, timeout=12):
@@ -937,14 +974,18 @@ def build_metadata_payload(
     reason,
 ):
     canonical_video_id = extract_canonical_video_id(video_id, json_data=json_data, result=result)
-    metadata_path = get_video_metadata_path(video_dir, canonical_video_id, status=status)
-    storage_dir = metadata_path.parent
-    storage_dir.mkdir(parents=True, exist_ok=True)
+    bucket = get_metadata_bucket(status, result=result)
+    metadata_path = get_video_metadata_path(video_dir, canonical_video_id, status=status, result=result)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_dir = metadata_path.parent if bucket == "downloaded" else metadata_path.parent
 
     file_path = result.get("file_path")
     filename = result.get("filename")
     if not file_path and filename:
-        file_path = str(storage_dir / filename)
+        file_path = str(get_video_storage_dir(video_dir, canonical_video_id) / filename)
+
+    compact_video = summarize_vimeo_video(json_data)
+    stored_video_payload = json_data if status == "downloaded" else compact_video
 
     payload = {
         "_saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -970,12 +1011,12 @@ def build_metadata_payload(
         "_api": api_probe,
         "_page_probe": build_page_probe(result),
         "_storage": {
-            "bucket": "downloaded" if status == "downloaded" else "not_downloaded",
-            "video_dir": str(storage_dir),
+            "bucket": bucket,
+            "video_dir": str(get_video_storage_dir(video_dir, canonical_video_id) if bucket == "downloaded" else metadata_path.parent),
             "metadata_path": str(metadata_path),
-            "per_video_directory": True,
+            "per_video_directory": bucket == "downloaded",
         },
-        "vimeo_video": json_data if isinstance(json_data, dict) else None,
+        "vimeo_video": stored_video_payload,
     }
     return payload, metadata_path
 
@@ -1206,8 +1247,9 @@ def download_video(
                         "Download button not found"
                     )
                     logger.info(
-                        "Page probe for %s did not find button, but API already confirmed non-original downloadability",
+                        "Page probe for %s did not find button, but API already confirmed non-original downloadability (link=%s)",
                         video_id,
+                        result.get("download_link"),
                     )
                     return result
                 result["error"] = "Download button not found"
@@ -1248,8 +1290,9 @@ def download_video(
                         f"({result['probe_error']})"
                     )
                     logger.info(
-                        "Page probe for %s did not expose original; keeping API non-original metadata only",
+                        "Page probe for %s did not expose original; keeping API non-original metadata only (link=%s)",
                         video_id,
+                        result.get("download_link"),
                     )
                     return result
                 result["error"] = result["probe_error"]
@@ -1273,9 +1316,10 @@ def download_video(
             if not result.get("policy_reason"):
                 result["policy_reason"] = "downloadable but best available option is not original"
             logger.info(
-                "Skipping download for %s because best available option is not original (%s)",
+                "Skipping download for %s because best available option is not original (%s, link=%s)",
                 video_id,
                 result["selected_quality"] or "unknown quality",
+                result.get("download_link"),
             )
             return result
 
@@ -1378,6 +1422,7 @@ def default_results_manifest(config, urls, source_signature):
                 "metadata_json": None,
                 "video_file": None,
                 "download_source": None,
+                "download_link": None,
                 "selected_quality": None,
                 "is_original": None,
                 "downloadable": None,
@@ -1385,6 +1430,7 @@ def default_results_manifest(config, urls, source_signature):
                 "download_link_found": None,
                 "available_options_count": 0,
                 "video_folder": None,
+                "storage_bucket": None,
                 "requested_video_id": extract_video_id(url),
                 "updated_at": None,
             }
@@ -1435,6 +1481,8 @@ def load_results_manifest(config, urls, source_signature, logger):
         item.setdefault("download_link_found", None)
         item.setdefault("available_options_count", 0)
         item.setdefault("video_folder", None)
+        item.setdefault("download_link", None)
+        item.setdefault("storage_bucket", None)
         item.setdefault("requested_video_id", item.get("video_id"))
 
     return loaded
@@ -1602,8 +1650,12 @@ def should_skip_existing_file(existing_file, existing_metadata, config):
 
 
 def resolve_existing_metadata_path(video_dir, json_dir, video_id):
-    for status in ("downloaded", "not_downloaded"):
+    for status in ("downloaded", "skipped", "failed"):
         preferred = get_video_metadata_path(video_dir, video_id, status=status)
+        if preferred.exists():
+            return preferred
+    for bucket in ("not_downloaded", "no_links"):
+        preferred = Path(video_dir) / bucket / f"{video_id}.json"
         if preferred.exists():
             return preferred
     legacy = Path(json_dir) / f"{video_id}.json"
@@ -1840,6 +1892,7 @@ def main():
                                     downloadable=True,
                                     download_link_found=True,
                                     video_folder=str(existing_file.parent),
+                                    storage_bucket="downloaded",
                                 )
                                 save_results_manifest(config, results_manifest)
                                 telegram.notify_progress(
@@ -1893,6 +1946,7 @@ def main():
                                 status="failed",
                                 reason="fatal_api_401 invalid token",
                                 metadata_json=str(metadata_path),
+                                storage_bucket=get_metadata_bucket("failed", result=result),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_api_error(401, "Invalid API token")
@@ -1919,6 +1973,7 @@ def main():
                                 status="failed",
                                 reason="fatal_api_429 rate limit exceeded",
                                 metadata_json=str(metadata_path),
+                                storage_bucket=get_metadata_bucket("failed", result=result),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_ip_blocked(
@@ -1987,6 +2042,7 @@ def main():
                                 status="skipped",
                                 reason=reason,
                                 metadata_json=str(metadata_path),
+                                storage_bucket=get_metadata_bucket("skipped", result=result),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_progress(
@@ -2045,6 +2101,7 @@ def main():
                                 status="skipped",
                                 reason="404 not found",
                                 metadata_json=str(metadata_path),
+                                storage_bucket=get_metadata_bucket("skipped", result=result),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_progress(
@@ -2111,6 +2168,7 @@ def main():
                                 reason="privacy.download=false and no API download links",
                                 metadata_json=str(metadata_path),
                                 downloadable=False,
+                                storage_bucket=get_metadata_bucket("skipped", result=result),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_progress(
@@ -2166,6 +2224,8 @@ def main():
                                 cloudflare_retry_count=attempt - 1,
                             )
                             if result["success"]:
+                                break
+                            if result.get("skipped_by_policy"):
                                 break
                             if attempt < retry_attempts:
                                 logger.warning(
@@ -2225,8 +2285,10 @@ def main():
                                 downloadable=result.get("downloadable"),
                                 button_found=result.get("button_found"),
                                 download_link_found=result.get("download_link_found"),
+                                download_link=result.get("download_link"),
                                 available_options_count=result.get("available_options_count"),
                                 video_folder=str(Path(metadata_path).parent),
+                                storage_bucket="downloaded",
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_video_downloaded(
@@ -2285,8 +2347,10 @@ def main():
                                 downloadable=result.get("downloadable"),
                                 button_found=result.get("button_found"),
                                 download_link_found=result.get("download_link_found"),
+                                download_link=result.get("download_link"),
                                 available_options_count=result.get("available_options_count"),
                                 video_folder=str(Path(metadata_path).parent),
+                                storage_bucket=get_metadata_bucket("skipped", result=result),
                             )
                             save_results_manifest(config, results_manifest)
                             telegram.notify_progress(
@@ -2350,8 +2414,10 @@ def main():
                                 downloadable=result.get("downloadable") if result else None,
                                 button_found=result.get("button_found") if result else None,
                                 download_link_found=result.get("download_link_found") if result else None,
+                                download_link=result.get("download_link") if result else None,
                                 available_options_count=result.get("available_options_count") if result else 0,
                                 video_folder=str(Path(metadata_path).parent),
+                                storage_bucket=get_metadata_bucket("failed", result=result),
                             )
                             save_results_manifest(config, results_manifest)
                             logger.error("Failed to download %s: %s", video_id, error_message)
@@ -2438,6 +2504,7 @@ def main():
                             reason=str(exc),
                             metadata_json=str(metadata_path),
                             video_folder=str(Path(metadata_path).parent),
+                            storage_bucket=get_metadata_bucket("failed", result=result),
                         )
                         save_results_manifest(config, results_manifest)
                         logger.error("Unexpected error processing %s: %s", video_id, exc)
@@ -2514,7 +2581,11 @@ def main():
         "jsons_dir": config["files"]["jsons_dir"],
         "failed_downloads": config["files"]["failed_downloads"],
         "results_file": config["files"]["results_file"],
-        "per_video_directory_storage": True,
+        "storage_layout": {
+            "downloaded": "per_video_directory",
+            "not_downloaded": "flat_json",
+            "no_links": "flat_json",
+        },
         "resume_enabled": config["resume"]["enabled"],
         "resume_state_file": config["resume"]["state_file"],
         "resume_next_index": resume_state["next_index"],
