@@ -20,6 +20,7 @@ import vimeo
 from seleniumbase import SB
 from selenium.webdriver.common.action_chains import ActionChains
 
+from config_utils import load_json_config_with_optional_secrets, resolve_path
 from telegram_notifier import TelegramNotifier
 from vimeo_cdp_helpers import (
     _extract_download_options_from_scope,
@@ -40,24 +41,12 @@ READING_TIME_MIN = 1
 READING_TIME_MAX = 3
 CLOUDFLARE_TIMEOUT_MIN = 40
 CLOUDFLARE_TIMEOUT_MAX = 60
-
-
-def resolve_path(config_dir, value):
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return (config_dir / path).resolve()
-
-
 def load_config(config_path):
-    config_path = Path(config_path).resolve()
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-
-    config_dir = config_path.parent
+    config, config_path, config_dir, secrets_path = load_json_config_with_optional_secrets(config_path)
     config["_meta"] = {
         "config_path": str(config_path),
         "config_dir": str(config_dir),
+        "secrets_path": str(secrets_path) if secrets_path else None,
     }
 
     files_cfg = config.setdefault("files", {})
@@ -97,11 +86,16 @@ def load_config(config_path):
     settings.setdefault("download_chunk_size_kb", 1024)
     settings.setdefault("download_progress_log_seconds", 15)
     settings.setdefault("download_only_original", False)
+    settings.setdefault("store_full_api_payload_for_downloaded", True)
     settings.setdefault("download_interface", "")
     settings.setdefault("download_retry_interface", "")
     settings.setdefault("login_completion_timeout_seconds", 30)
     settings.setdefault("login_retry_attempts", 3)
     settings.setdefault("login_retry_delay_seconds", 10)
+
+    login_cfg = config.setdefault("vimeo_login", {})
+    login_cfg.setdefault("email", "")
+    login_cfg.setdefault("password", "")
 
     browser = config.setdefault("browser", {})
     browser.setdefault("uc", True)
@@ -170,6 +164,21 @@ def load_config(config_path):
     ):
         if key in batches:
             batches[key] = str(resolve_path(config_dir, batches[key]))
+
+    offload = config.setdefault("offload", {})
+    offload.setdefault("enabled", False)
+    offload.setdefault("storage_root", "")
+    offload.setdefault("registry_file", str(Path(files_cfg["logs_dir"]) / "offload_registry.json"))
+    offload.setdefault("log_file", str(Path(files_cfg["logs_dir"]) / "offload.log"))
+    offload.setdefault("scan_interval_seconds", 600)
+    offload.setdefault("min_file_age_seconds", 30)
+    offload.setdefault("delete_local_video_after_upload", False)
+    offload.setdefault("validate_with_ffprobe", True)
+    offload.setdefault("ffprobe_bin", "ffprobe")
+
+    for key in ("storage_root", "registry_file", "log_file"):
+        if offload.get(key):
+            offload[key] = str(resolve_path(config_dir, offload[key]))
 
     return config
 
@@ -378,13 +387,14 @@ def check_if_cloudflare_blocked(sb, logger):
         return False
 
 
-def require_login_credentials():
-    email = os.environ.get("VIMEO_EMAIL", "").strip()
-    password = os.environ.get("VIMEO_PASSWORD", "")
+def require_login_credentials(config):
+    login_cfg = config.get("vimeo_login", {})
+    email = (os.environ.get("VIMEO_EMAIL") or login_cfg.get("email") or "").strip()
+    password = os.environ.get("VIMEO_PASSWORD") or login_cfg.get("password") or ""
     if not email or not password:
         raise RuntimeError(
-            "VIMEO_EMAIL and VIMEO_PASSWORD environment variables are required "
-            "when runtime.vimeo_authenticated_session=true"
+            "Vimeo login credentials are required when runtime.vimeo_authenticated_session=true. "
+            "Set VIMEO_EMAIL/VIMEO_PASSWORD or fill vimeo_login.email/password in config/secrets."
         )
     return email, password
 
@@ -825,7 +835,13 @@ def load_existing_download_metadata(metadata_path, config=None, logger=None):
         return {
             "selected_quality": None,
             "download_source": None,
+            "filename": None,
+            "file_path": None,
+            "file_size_mb": None,
             "is_original": False if config is not None else None,
+            "offloaded": False,
+            "remote_video_file": None,
+            "remote_metadata_json": None,
         }
 
     try:
@@ -837,6 +853,7 @@ def load_existing_download_metadata(metadata_path, config=None, logger=None):
         return {}
 
     download = payload.setdefault("_download", {})
+    offload = payload.get("_offload") or {}
     selected_quality = download.get("selected_quality")
     download_source = download.get("source")
     is_original = download.get("is_original")
@@ -858,7 +875,13 @@ def load_existing_download_metadata(metadata_path, config=None, logger=None):
     return {
         "selected_quality": selected_quality,
         "download_source": download_source,
+        "filename": download.get("filename"),
+        "file_path": download.get("file_path"),
+        "file_size_mb": download.get("file_size_mb"),
         "is_original": is_original,
+        "offloaded": offload.get("status") == "uploaded",
+        "remote_video_file": offload.get("remote_video_file"),
+        "remote_metadata_json": offload.get("remote_metadata_json"),
     }
 
 
@@ -1174,7 +1197,12 @@ def build_metadata_payload(
         file_path = str(get_video_storage_dir(video_dir, canonical_video_id) / filename)
 
     compact_video = summarize_vimeo_video(json_data)
-    stored_video_payload = json_data if status == "downloaded" else compact_video
+    store_full_downloaded_payload = bool(
+        config["settings"].get("store_full_api_payload_for_downloaded", True)
+    )
+    stored_video_payload = (
+        json_data if status == "downloaded" and store_full_downloaded_payload else compact_video
+    )
 
     payload = {
         "_saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1204,6 +1232,16 @@ def build_metadata_payload(
             "video_dir": str(get_video_storage_dir(video_dir, canonical_video_id) if bucket == "downloaded" else metadata_path.parent),
             "metadata_path": str(metadata_path),
             "per_video_directory": bucket == "downloaded",
+        },
+        "_offload": {
+            "status": None,
+            "remote_root": None,
+            "remote_video_file": None,
+            "remote_metadata_json": None,
+            "uploaded_at": None,
+            "verified_with_ffprobe": None,
+            "local_video_deleted": False,
+            "local_video_deleted_at": None,
         },
         "vimeo_video": stored_video_payload,
     }
@@ -1838,6 +1876,14 @@ def should_skip_existing_file(existing_file, existing_metadata, config):
     return existing_metadata.get("is_original") is True
 
 
+def should_skip_offloaded_metadata(existing_metadata, config):
+    if not existing_metadata.get("offloaded"):
+        return False
+    if not bool(config["settings"].get("download_only_original", False)):
+        return True
+    return existing_metadata.get("is_original") is True
+
+
 def resolve_existing_metadata_path(video_dir, json_dir, video_id):
     for status in ("downloaded", "skipped", "failed"):
         preferred = get_video_metadata_path(video_dir, video_id, status=status)
@@ -2016,7 +2062,7 @@ def main():
             )
         else:
             if bool(config["runtime"].get("vimeo_authenticated_session", False)):
-                login_email, login_password = require_login_credentials()
+                login_email, login_password = require_login_credentials(config)
                 logger.info("Authenticated Vimeo session requested for this worker")
             with SB(**sb_kwargs) as sb:
                 logger.info("SeleniumBase browser started")
@@ -2028,79 +2074,103 @@ def main():
                     video_id = extract_video_id(video_url)
                     if config["resume"]["skip_completed_files"]:
                         existing_file = find_existing_completed_file(video_dir, video_id)
+                        metadata_path = resolve_existing_metadata_path(video_dir, json_dir, video_id)
+                        existing_metadata = load_existing_download_metadata(
+                            metadata_path,
+                            config=config,
+                            logger=logger,
+                        )
+                        skip_reason = None
+                        skipped_video_file = None
+                        skipped_file_size_mb = existing_metadata.get("file_size_mb")
+                        skipped_video_folder = None
+
                         if existing_file is not None:
-                            metadata_path = resolve_existing_metadata_path(video_dir, json_dir, video_id)
-                            existing_metadata = load_existing_download_metadata(
-                                metadata_path,
-                                config=config,
-                                logger=logger,
-                            )
                             if not should_skip_existing_file(existing_file, existing_metadata, config):
                                 logger.info(
                                     "Existing file for %s is not considered complete under original-only policy; reprocessing",
                                     video_id,
                                 )
                             else:
-                                successful_downloads += 1
-                                runtime_state.touch("already downloaded", video_id)
-                                runtime_state.update_counts(
-                                    i,
-                                    successful_downloads,
-                                    skipped_videos,
-                                    failed_videos,
-                                )
+                                skip_reason = "file already existed before resume"
+                                skipped_video_file = str(existing_file)
+                                skipped_file_size_mb = round(existing_file.stat().st_size / (1024 * 1024), 3)
+                                skipped_video_folder = str(existing_file.parent)
                                 logger.info(
                                     "Skipping %s because completed file already exists: %s",
                                     video_id,
                                     existing_file,
                                 )
-                                checkpoint_resume_state(
-                                    config,
-                                    resume_state,
-                                    i,
-                                    successful_downloads,
-                                    skipped_videos,
-                                    failed_videos,
-                                    video_id,
-                                    "already_downloaded",
-                                    len(urls),
-                                    source_signature,
+                        elif should_skip_offloaded_metadata(existing_metadata, config):
+                            skip_reason = "file already offloaded before resume"
+                            skipped_video_file = (
+                                existing_metadata.get("remote_video_file")
+                                or existing_metadata.get("file_path")
+                            )
+                            skipped_video_folder = (
+                                str(Path(skipped_video_file).parent) if skipped_video_file else None
+                            )
+                            logger.info(
+                                "Skipping %s because metadata says the downloaded file was already offloaded",
+                                video_id,
+                            )
+
+                        if skip_reason:
+                            successful_downloads += 1
+                            runtime_state.touch("already downloaded", video_id)
+                            runtime_state.update_counts(
+                                i,
+                                successful_downloads,
+                                skipped_videos,
+                                failed_videos,
+                            )
+                            checkpoint_resume_state(
+                                config,
+                                resume_state,
+                                i,
+                                successful_downloads,
+                                skipped_videos,
+                                failed_videos,
+                                video_id,
+                                "already_downloaded",
+                                len(urls),
+                                source_signature,
+                            )
+                            update_results_manifest(
+                                results_manifest,
+                                i,
+                                status="downloaded",
+                                reason=skip_reason,
+                                filename=existing_metadata.get("filename") or (Path(skipped_video_file).name if skipped_video_file else None),
+                                file_size_mb=skipped_file_size_mb,
+                                metadata_json=str(metadata_path),
+                                video_file=skipped_video_file,
+                                download_source=existing_metadata.get("download_source"),
+                                selected_quality=existing_metadata.get("selected_quality"),
+                                is_original=existing_metadata.get("is_original"),
+                                downloadable=True,
+                                download_link_found=True,
+                                video_folder=skipped_video_folder,
+                                storage_bucket="downloaded",
+                            )
+                            save_results_manifest(config, results_manifest)
+                            telegram.notify_progress(
+                                i,
+                                len(urls),
+                                successful_downloads,
+                                skipped_videos,
+                                failed_videos,
+                                current_video_id=video_id,
+                                current_stage="already downloaded",
+                            )
+                            if i < len(urls):
+                                delay = random.uniform(
+                                    MIN_DELAY_BETWEEN_VIDEOS,
+                                    MAX_DELAY_BETWEEN_VIDEOS,
                                 )
-                                update_results_manifest(
-                                    results_manifest,
-                                    i,
-                                    status="downloaded",
-                                    reason="file already existed before resume",
-                                    filename=existing_file.name,
-                                    file_size_mb=round(existing_file.stat().st_size / (1024 * 1024), 3),
-                                    metadata_json=str(metadata_path),
-                                    video_file=str(existing_file),
-                                    download_source=existing_metadata.get("download_source"),
-                                    selected_quality=existing_metadata.get("selected_quality"),
-                                    is_original=existing_metadata.get("is_original"),
-                                    downloadable=True,
-                                    download_link_found=True,
-                                    video_folder=str(existing_file.parent),
-                                    storage_bucket="downloaded",
-                                )
-                                save_results_manifest(config, results_manifest)
-                                telegram.notify_progress(
-                                    i,
-                                    len(urls),
-                                    successful_downloads,
-                                    skipped_videos,
-                                    failed_videos,
-                                    current_video_id=video_id,
-                                    current_stage="already downloaded",
-                                )
-                                if i < len(urls):
-                                    delay = random.uniform(
-                                        MIN_DELAY_BETWEEN_VIDEOS,
-                                        MAX_DELAY_BETWEEN_VIDEOS,
-                                    )
-                                    logger.info("Delay before next video: %.1fs", delay)
-                                    time.sleep(delay)
-                                continue
+                                logger.info("Delay before next video: %.1fs", delay)
+                                time.sleep(delay)
+                            continue
 
                     runtime_state.touch("api check", video_id)
                     logger.info("\n%s", "=" * 80)

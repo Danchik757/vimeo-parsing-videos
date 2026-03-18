@@ -1,8 +1,13 @@
 {
+  "secrets_file": "config.secrets.example.json",
   "vimeo_api": {
     "token": "YOUR_VIMEO_TOKEN",
     "secret": "YOUR_VIMEO_SECRET",
     "client_id": "YOUR_VIMEO_CLIENT_ID"
+  },
+  "vimeo_login": {
+    "email": "YOUR_VIMEO_EMAIL",
+    "password": "YOUR_VIMEO_PASSWORD"
   },
   "proxy": {
     "enabled": false,
@@ -69,8 +74,12 @@
     "download_chunk_size_kb": 1024,
     "download_progress_log_seconds": 15,
     "download_only_original": false,
+    "store_full_api_payload_for_downloaded": true,
     "download_interface": "",
-    "download_retry_interface": ""
+    "download_retry_interface": "",
+    "login_completion_timeout_seconds": 30,
+    "login_retry_attempts": 3,
+    "login_retry_delay_seconds": 10
   },
   "browser": {
     "uc": true,
@@ -101,6 +110,17 @@
     "state_file": "output/run/resume_state.json",
     "skip_completed_files": true,
     "resume_partial_downloads": true
+  },
+  "offload": {
+    "enabled": false,
+    "storage_root": "/absolute/path/to/mounted/storage/parse-1",
+    "registry_file": "output/run/offload_registry.json",
+    "log_file": "output/run/offload.log",
+    "scan_interval_seconds": 600,
+    "min_file_age_seconds": 30,
+    "delete_local_video_after_upload": false,
+    "validate_with_ffprobe": true,
+    "ffprobe_bin": "ffprobe"
   },
   "workers": {
     "count": 2,

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from download_vimeo_seleniumbase_v3 import PROJECT_ROOT, load_config, setup_logger
+from result_exports import write_result_url_lists
 from telegram_notifier import TelegramNotifier
 
 
@@ -359,11 +360,16 @@ def main():
     with open(aggregate_results_manifest_path, "w", encoding="utf-8") as f:
         json.dump(aggregate_results_manifest, f, indent=2, ensure_ascii=False)
 
+    exported_lists = write_result_url_lists(aggregate_results_items, workers_root)
+    aggregate["url_list_exports"] = exported_lists
+
     aggregate_summary_path = workers_root / "aggregate_summary.json"
     with open(aggregate_summary_path, "w", encoding="utf-8") as f:
         json.dump(aggregate, f, indent=2, ensure_ascii=False)
 
     coordinator_logger.info("Aggregate summary saved to %s", aggregate_summary_path)
+    for bucket, path in exported_lists.items():
+        coordinator_logger.info("Exported %s URLs to %s", bucket, path)
     telegram.notify_custom(
         "Coordinator finish",
         [
@@ -375,6 +381,9 @@ def main():
             f"exit_code: {exit_code}",
             f"summary: <code>{aggregate_summary_path}</code>",
             f"results: <code>{aggregate_results_manifest_path}</code>",
+            f"downloaded_urls: <code>{exported_lists['downloaded_original']}</code>",
+            f"not_downloaded_urls: <code>{exported_lists['not_downloaded_downloadable']}</code>",
+            f"no_links_urls: <code>{exported_lists['no_links']}</code>",
         ],
         wait=True,
     )
