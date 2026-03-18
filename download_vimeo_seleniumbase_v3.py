@@ -371,6 +371,94 @@ def check_if_cloudflare_blocked(sb, logger):
         return False
 
 
+def require_login_credentials():
+    email = os.environ.get("VIMEO_EMAIL", "").strip()
+    password = os.environ.get("VIMEO_PASSWORD", "")
+    if not email or not password:
+        raise RuntimeError(
+            "VIMEO_EMAIL and VIMEO_PASSWORD environment variables are required "
+            "when runtime.vimeo_authenticated_session=true"
+        )
+    return email, password
+
+
+def is_login_page(current_url, title, page_context=None):
+    haystack = f"{current_url} {title}".lower()
+    if "log_in" in haystack or "login" in haystack:
+        return True
+    viewer_bootstrap = (page_context or {}).get("viewer_bootstrap") or {}
+    if viewer_bootstrap.get("logged_in") is False:
+        return True
+    return False
+
+
+def login_to_vimeo(sb, email, password, logger):
+    logger.info("Opening Vimeo login page")
+    sb.open("https://vimeo.com/log_in")
+    sb.sleep(3)
+
+    email_selectors = [
+        "#email_login",
+        "input[data-testid='site_login_email_input']",
+        "input[name='email']",
+        "input[type='email']",
+        "#email",
+    ]
+    password_selectors = [
+        "#password_login",
+        "input[data-testid='site_login_password_input']",
+        "input[name='password']",
+        "input[type='password']",
+        "#password",
+    ]
+    submit_selectors = [
+        "button[data-testid='site_login_submit_button']",
+        "button[type='submit']",
+        "button[aria-label*='Log in']",
+    ]
+
+    for selector in email_selectors:
+        try:
+            sb.wait_for_element_visible(selector, timeout=10)
+            sb.clear(selector)
+            sb.type(selector, email)
+            break
+        except Exception:
+            continue
+    else:
+        raise RuntimeError("Email input not found on Vimeo login page")
+
+    for selector in password_selectors:
+        try:
+            sb.clear(selector)
+            sb.type(selector, password)
+            break
+        except Exception:
+            continue
+    else:
+        raise RuntimeError("Password input not found on Vimeo login page")
+
+    for selector in submit_selectors:
+        try:
+            sb.click(selector)
+            break
+        except Exception:
+            continue
+    else:
+        raise RuntimeError("Login submit button not found on Vimeo login page")
+
+    logger.info("Waiting for login to complete")
+    sb.sleep(8)
+    current_url = ""
+    try:
+        current_url = sb.get_current_url()
+    except Exception:
+        pass
+    if "log_in" in current_url:
+        raise RuntimeError(f"Login appears incomplete, still on {current_url}")
+    logger.info("Logged in successfully")
+
+
 def parse_content_range_total(header_value):
     if not header_value or "/" not in header_value:
         return None
@@ -823,6 +911,8 @@ def build_page_probe(result):
         "visited": result.get("page_visited", False),
         "page_url": result.get("page_url"),
         "page_title": result.get("page_title"),
+        "authenticated_session": result.get("authenticated_session"),
+        "session_relogin": result.get("session_relogin", False),
         "cloudflare_detected": result.get("cloudflare_detected", False),
         "download_button_found": result.get("button_found"),
         "download_link_found": result.get("download_link_found", False),
@@ -866,6 +956,7 @@ def build_metadata_payload(
             "reason": reason,
             "worker_name": config["runtime"]["worker_name"],
             "browser_mode": browser_mode_label(config),
+            "authenticated_session": bool(config["runtime"].get("vimeo_authenticated_session", False)),
             "download_only_original": bool(config["settings"].get("download_only_original", False)),
             "downloadable": result.get("downloadable"),
             "filename": filename,
@@ -925,6 +1016,8 @@ def download_video(
     logger,
     config,
     runtime_state,
+    login_email=None,
+    login_password=None,
     cloudflare_retry_count=0,
 ):
     result = {
@@ -952,6 +1045,8 @@ def download_video(
         "page_title": None,
         "page_context": None,
         "cloudflare_detected": False,
+        "session_relogin": False,
+        "authenticated_session": bool(config["runtime"].get("vimeo_authenticated_session", False)),
         "canonical_video_id": None,
         "file_path": None,
     }
@@ -1019,6 +1114,36 @@ def download_video(
                 result["page_context"] = extract_page_context_summary(sb.get_page_source())
             except Exception:
                 result["page_context"] = None
+
+            if bool(config["runtime"].get("vimeo_authenticated_session", False)) and is_login_page(
+                result.get("page_url"),
+                result.get("page_title"),
+                result.get("page_context"),
+            ):
+                logger.warning(
+                    "Session appears logged out while opening %s; re-authenticating",
+                    video_url,
+                )
+                runtime_state.touch("re-authenticating session", video_id)
+                login_to_vimeo(sb, login_email, login_password, logger)
+                result["session_relogin"] = True
+                sb.open(video_url)
+
+                initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
+                logger.info("Waiting %.1fs for page reload after login...", initial_wait)
+                sb.sleep(initial_wait)
+                try:
+                    result["page_url"] = sb.get_current_url()
+                except Exception:
+                    result["page_url"] = video_url
+                try:
+                    result["page_title"] = sb.get_title()
+                except Exception:
+                    result["page_title"] = None
+                try:
+                    result["page_context"] = extract_page_context_summary(sb.get_page_source())
+                except Exception:
+                    result["page_context"] = None
 
             if check_if_cloudflare_blocked(sb, logger):
                 result["cloudflare_detected"] = True
@@ -1518,6 +1643,8 @@ def create_placeholder_result():
         "page_title": None,
         "page_context": None,
         "cloudflare_detected": False,
+        "session_relogin": False,
+        "authenticated_session": False,
     }
 
 
@@ -1634,6 +1761,8 @@ def main():
 
     fatal_error = None
     exit_code = 0
+    login_email = None
+    login_password = None
 
     sb_kwargs = build_sb_kwargs(config, logger)
     logger.info("SeleniumBase args: %s", sb_kwargs)
@@ -1645,8 +1774,14 @@ def main():
                 len(urls),
             )
         else:
+            if bool(config["runtime"].get("vimeo_authenticated_session", False)):
+                login_email, login_password = require_login_credentials()
+                logger.info("Authenticated Vimeo session requested for this worker")
             with SB(**sb_kwargs) as sb:
                 logger.info("SeleniumBase browser started")
+                if bool(config["runtime"].get("vimeo_authenticated_session", False)):
+                    runtime_state.touch("logging into vimeo")
+                    login_to_vimeo(sb, login_email, login_password, logger)
 
                 for i, video_url in enumerate(urls[start_index:], start=start_index + 1):
                     video_id = extract_video_id(video_url)
@@ -2026,6 +2161,8 @@ def main():
                                 logger,
                                 config,
                                 runtime_state,
+                                login_email=login_email,
+                                login_password=login_password,
                                 cloudflare_retry_count=attempt - 1,
                             )
                             if result["success"]:
