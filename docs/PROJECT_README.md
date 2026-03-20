@@ -78,8 +78,8 @@ Coordinator also exports:
 
 ## Docs
 
-- `docs/ARCHITECTURE.md`: pipeline, metadata model, logging, resume, offload
-- `docs/RUNBOOK.md`: full setup and operational instructions
+- `ARCHITECTURE.md`: pipeline, metadata model, logging, resume, offload
+- `RUNBOOK.md`: full setup and operational instructions
 - `SERVER_WORKERS_GUIDE.md`: short server-oriented entry doc
 - `WORKING_VERSION_GUIDE.md`: legacy snapshot of the older approach
 
@@ -93,4 +93,4 @@ pip install -r requirements.txt
 python run_workers.py --config config.profile.example.json --workers 2
 ```
 
-For the full production flow, use `docs/RUNBOOK.md`.
+For the full production flow, use `RUNBOOK.md`.

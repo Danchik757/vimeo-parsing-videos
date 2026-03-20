@@ -60,4 +60,4 @@ pip install -r requirements.txt
 
 ## Подробная документация
 
-Смотри [memo.md](memo.md) для полной информации о проекте.
+Смотри [PROJECT_MEMO.md](PROJECT_MEMO.md) для полной информации о проекте.

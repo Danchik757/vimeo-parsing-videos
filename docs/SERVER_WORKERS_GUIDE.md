@@ -4,8 +4,8 @@ This file is the short entry point for server runs.
 
 The detailed version is now split into:
 
-- `docs/ARCHITECTURE.md`
-- `docs/RUNBOOK.md`
+- `ARCHITECTURE.md`
+- `RUNBOOK.md`
 
 ## Production Checklist
 

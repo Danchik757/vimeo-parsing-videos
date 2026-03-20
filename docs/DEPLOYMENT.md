@@ -23,8 +23,7 @@ tar -czf vimeo-downloader.tar.gz \
     need_parse_unique.json \
     requirements.txt \
     chrome_proxy_extension/ \
-    docs/ \
-    README.md
+    docs/
 
 # Проверить архив
 ls -lh vimeo-downloader.tar.gz

@@ -103,7 +103,7 @@ def main():
         }
 
     write_json(output_root / "assignment_manifest.json", assignment_manifest)
-    readme_path = output_root / "README.md"
+    readme_path = output_root / "README.txt"
     readme_path.write_text(
         "\n".join(
             [
