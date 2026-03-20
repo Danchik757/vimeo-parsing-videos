@@ -66,6 +66,32 @@ def parse_args():
     return parser.parse_args()
 
 
+def resolve_manifest_source_json(manifest_path, source_json, filename=None):
+    manifest_path = Path(manifest_path).resolve()
+    manifest_dir = manifest_path.parent
+    source_path = Path(source_json)
+
+    candidates = []
+    if not source_path.is_absolute():
+        candidates.append((manifest_dir / source_path).resolve())
+    if filename:
+        candidates.append((manifest_dir / filename).resolve())
+    candidates.append((manifest_dir / source_path.name).resolve())
+    if source_path.is_absolute():
+        candidates.append(source_path)
+
+    seen = set()
+    for candidate in candidates:
+        candidate_str = str(candidate)
+        if candidate_str in seen:
+            continue
+        seen.add(candidate_str)
+        if candidate.exists():
+            return candidate_str
+
+    return str(candidates[0])
+
+
 def normalize_assignment_manifest(manifest_path):
     manifest_path = Path(manifest_path).resolve()
     payload = read_json(manifest_path)
@@ -73,13 +99,14 @@ def normalize_assignment_manifest(manifest_path):
     for item in payload.get("batches", []):
         batch_number = int(item["batch_number"])
         source_json = item.get("path") or item.get("source_json")
+        filename = item.get("filename") or (Path(source_json).name if source_json else None)
         if not source_json:
             raise ValueError(f"Manifest batch {batch_number} is missing path/source_json")
         batches.append(
             {
                 "batch_number": batch_number,
-                "source_json": str(Path(source_json).resolve()),
-                "filename": item.get("filename") or Path(source_json).name,
+                "source_json": resolve_manifest_source_json(manifest_path, source_json, filename=filename),
+                "filename": filename,
                 "total_urls": int(item.get("url_count") or item.get("total_urls") or 0),
             }
         )

@@ -62,7 +62,7 @@ def main():
         )
 
     assignment_manifest = {
-        "source_json": str(source_path),
+        "source_json": str(source_path.name),
         "total_urls": len(urls),
         "batch_size": int(args.batch_size),
         "total_shards": len(shards),
@@ -82,14 +82,14 @@ def main():
                 {
                     "batch_number": shard_index,
                     "filename": shard_path.name,
-                    "path": str(shard_path),
+                    "path": shard_path.name,
                     "url_count": len(shard_urls),
                 }
             )
 
         server_manifest = {
             "server_name": server_name,
-            "source_json": str(source_path),
+            "source_json": str(Path("..") / ".." / ".." / source_path.name),
             "batch_size": int(args.batch_size),
             "shard_count": len(server_entries),
             "total_urls": sum(item["url_count"] for item in server_entries),
@@ -99,7 +99,7 @@ def main():
         assignment_manifest["servers"][server_name] = {
             "shard_count": len(server_entries),
             "total_urls": server_manifest["total_urls"],
-            "manifest": str((server_dir / "manifest.json").resolve()),
+            "manifest": str(Path(server_name) / "manifest.json"),
         }
 
     write_json(output_root / "assignment_manifest.json", assignment_manifest)

@@ -6,6 +6,7 @@ from pathlib import Path
 from run_assigned_shards import (
     load_assignment_state,
     normalize_assignment_manifest,
+    resolve_manifest_source_json,
     save_assignment_state,
     select_batches,
 )
@@ -20,6 +21,50 @@ class _LoggerStub:
 
 
 class AssignedShardsTests(unittest.TestCase):
+    def test_resolve_manifest_source_json_falls_back_to_manifest_dir_filename(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            manifest_dir = tmpdir / "parse-1"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            shard_path = manifest_dir / "batch_0001.json"
+            shard_path.write_text(json.dumps(["https://vimeo.com/1"]), encoding="utf-8")
+            manifest_path = manifest_dir / "manifest.json"
+            manifest_path.write_text("{}", encoding="utf-8")
+
+            resolved = resolve_manifest_source_json(
+                manifest_path,
+                "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0001.json",
+                filename="batch_0001.json",
+            )
+
+            self.assertEqual(resolved, str(shard_path.resolve()))
+
+    def test_normalize_assignment_manifest_accepts_relative_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            batch_path = tmpdir / "batch_0001.json"
+            batch_path.write_text(json.dumps(["https://vimeo.com/1"]), encoding="utf-8")
+
+            manifest_path = tmpdir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "server_name": "parse-1",
+                        "source_json": "../../../need_parse_unique.json",
+                        "batch_size": 10000,
+                        "shard_count": 1,
+                        "total_urls": 1,
+                        "batches": [
+                            {"batch_number": 1, "filename": "batch_0001.json", "path": "batch_0001.json", "url_count": 1},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = normalize_assignment_manifest(manifest_path)
+            self.assertEqual(manifest["batches"][0]["source_json"], str(batch_path.resolve()))
+
     def test_select_batches_respects_range_and_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
