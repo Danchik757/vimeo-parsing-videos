@@ -29,6 +29,11 @@ def shard_urls(urls, worker_count):
 def build_worker_config(master_config, worker_dir, shard_path, worker_index, worker_count):
     worker_name = f"worker-{worker_index:02d}"
     worker_config = json.loads(json.dumps(master_config))
+    # Worker configs are written into per-worker output directories, so they must
+    # be self-contained and must not try to resolve the original profile secrets
+    # file relative to the worker directory.
+    worker_config.pop("secrets_file", None)
+    worker_config.pop("_meta", None)
     shared_media_dirs = bool(master_config.get("workers", {}).get("shared_media_dirs", False))
     api_pool = master_config.get("workers", {}).get("api_pool") or []
 
