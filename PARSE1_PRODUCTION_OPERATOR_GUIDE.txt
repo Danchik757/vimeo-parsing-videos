@@ -85,6 +85,8 @@ Important effective settings from config.parse-1.profile.json:
 - offload.storage_root = /home/msu_cc/mount/mimas/vimeo/2025scraped/parse-1
 - offload.delete_local_video_after_upload = true
 - offload.validate_with_ffprobe = true
+- batches.stop_on_batch_error = false
+- batches.max_batch_retries = 2
 
 Meaning:
 
@@ -94,6 +96,8 @@ Meaning:
 - curl may keep running while data arrives normally
 - if curl speed drops below 1 byte/sec for 60 seconds, curl fails
 - partial downloads are resumable because resume_partial_downloads = true
+- one failed batch does not stop the whole queue
+- a failed batch is re-queued automatically up to 2 times
 
 
 4. IMPORTANT OUTPUT PATHS
@@ -257,11 +261,19 @@ Each batch has a state item:
 Meaning:
 
 - pending: batch was not started yet
+- pending: also used when a running batch was re-queued for retry
 - running: batch is currently assigned to one active worker slot
 - completed: batch finished and summary/results were collected
-- failed: batch process exited badly or required output files were missing
+- failed: batch process exited badly, exhausted retries, or required output files were missing
 
 This file is the main truth source for queue progress.
+
+Useful fields in each batch item:
+
+- assigned_worker
+- retry_count
+- exit_code
+- last_error
 
 
 9. HOW TO READ aggregate_summary.json
@@ -327,6 +339,18 @@ Why this works:
 - each batch has its own resume_state.json
 - partial downloads can resume
 - already uploaded files are tracked by offload_registry.json
+- re-queued batches keep their retry_count
+
+If you updated code or config:
+
+1. stop parser and watcher
+2. keep output/runs/parse-1 intact
+3. start parser with the same command
+4. start watcher with the same command
+
+If an older run left permanent failed batches that you want to retry once with the
+new logic, edit assignment_state.json and switch those batch items from failed to
+pending before restart.
 
 Restart parser:
 
@@ -384,6 +408,8 @@ What it means:
 
 - Vimeo login flow did not complete
 - account challenge or page timing issue
+- batch will be re-queued automatically until max_batch_retries is exhausted
+- other running batches keep working because stop_on_batch_error = false
 
 Where to look:
 
@@ -448,6 +474,30 @@ Last lines from batch 0001:
 
   tail -n 80 /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/shards/batch_0001/download.log
 
+Live batch retry / failure lines:
+
+  grep -n "Re-queueing retry\|failed or is missing output files" \
+    /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/workers/coordinator.log | tail -n 40
+
+Current queue snapshot:
+
+  python - <<'PY'
+import json
+p = '/29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/workers/assignment_state.json'
+state = json.load(open(p, 'r', encoding='utf-8'))
+items = state['items']
+for key in sorted(items, key=lambda x: int(x)):
+    item = items[key]
+    if int(key) <= 16:
+        print(
+            key,
+            'status=', item.get('status'),
+            'worker=', item.get('assigned_worker'),
+            'retry_count=', item.get('retry_count'),
+            'exit_code=', item.get('exit_code'),
+        )
+PY
+
 Count uploaded originals already offloaded:
 
   python - <<'PY'
@@ -496,6 +546,7 @@ For parse-1, use:
 - 8 worker slots
 - telegram-wg as direct media interface
 - offload watcher in parallel
+- stop_on_batch_error = false
+- max_batch_retries = 2
 
 Do not use the old fixed-shard run_workers.py mode for the main parse-1 production run.
-

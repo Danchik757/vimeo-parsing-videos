@@ -181,28 +181,23 @@ Inside `tmux`:
 ```bash
 cd /Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix
 source venv/bin/activate
-python run_workers.py --config config.parse-1.profile.json --workers 15
-```
-
-If you already prepared fixed `10000`-URL shards for a server, for example:
-
-- `data_shards/server_assignments_10000/parse-1/manifest.json`
-
-and want each worker slot to keep pulling the next unfinished shard until the queue is empty, use:
-
-```bash
 python run_assigned_shards.py \
   --config config.parse-1.profile.json \
   --manifest data_shards/server_assignments_10000/parse-1/manifest.json \
-  --workers 15
+  --workers 8
 ```
 
-This queue mode is the recommended production path when shard difficulty is uneven, because worker slots are no longer tied to exactly `3` shard files each.
+This queue mode is the recommended production path for `parse-1`, because worker
+slots are not tied to fixed shard groups and a fast slot can pull the next pending
+batch immediately.
 
 If your login credentials are not stored in `vimeo_login`, you can still override by environment:
 
 ```bash
-VIMEO_EMAIL='...' VIMEO_PASSWORD='...' python run_workers.py --config config.parse-1.profile.json --workers 15
+VIMEO_EMAIL='...' VIMEO_PASSWORD='...' python run_assigned_shards.py \
+  --config config.parse-1.profile.json \
+  --manifest data_shards/server_assignments_10000/parse-1/manifest.json \
+  --workers 8
 ```
 
 ## 8. Start Offload Watcher
@@ -233,6 +228,9 @@ Recommended production pattern:
 
 - parser in one long-lived `tmux`/service
 - offload watcher in a second long-lived `tmux`/service
+- `download_interface = telegram-wg`
+- `batches.stop_on_batch_error = false`
+- `batches.max_batch_retries = 2`
 
 This is better than waiting until the end of a `10000` URL run, because local disk can fill up first.
 
@@ -244,22 +242,34 @@ Coordinator:
 tail -f output/runs/parse-1/workers/coordinator.log
 ```
 
-Single worker:
+Current queue state:
 
 ```bash
-tail -f output/runs/parse-1/workers/worker_07/download.log
+python -m json.tool output/runs/parse-1/workers/assignment_state.json | less
 ```
 
 Login failures:
 
 ```bash
-grep -R "Login appears incomplete\\|login_failure_attempt" -n output/runs/parse-1/workers/worker_*/download.log
+grep -R "Login appears incomplete\\|login_failure_attempt" -n output/runs/parse-1/shards/batch_*/download.log
 ```
 
-WG download retries:
+Current shard activity:
 
 ```bash
-grep -R "Retrying via interface telegram-wg\\|via curl on interface telegram-wg" -n output/runs/parse-1/workers/worker_*/download.log
+tail -f output/runs/parse-1/shards/batch_0001/download.log
+```
+
+WG downloads:
+
+```bash
+grep -R "via curl on interface telegram-wg\\|Successfully downloaded" -n output/runs/parse-1/shards/batch_*/download.log | tail -n 50
+```
+
+Queue retries and hard failures:
+
+```bash
+grep -n "Re-queueing retry\\|failed or is missing output files" output/runs/parse-1/workers/coordinator.log | tail -n 40
 ```
 
 Realtime CPU/RAM/disk:
@@ -305,11 +315,19 @@ pkill -f "scripts/offload_downloads.py --config config.parse-1.profile.json"
 
 Resume works as long as you keep:
 
-- `workers/worker_XX/resume_state.json`
-- `workers/worker_XX/results_manifest.json`
-- local metadata JSONs in `videos/downloaded`, `videos/not_downloaded`, `videos/no_links`
+- `workers/assignment_state.json`
+- `shards/batch_XXXX/resume_state.json`
+- `shards/batch_XXXX/results_manifest.json`
+- local metadata JSONs in `videos/downloaded` and `videos/not_downloaded`
+- `workers/no_links_urls.txt`
 
 After offload, local `.mp4` may be deleted, but local metadata JSON remains. That is enough for resume to skip already uploaded originals.
+
+Current queue behavior after a batch failure:
+
+- other running batches continue working
+- the failed batch is returned to `pending` automatically until `max_batch_retries` is exhausted
+- after retries are exhausted, that batch becomes `failed`
 
 ## 12. End-Of-Run Exports
 
