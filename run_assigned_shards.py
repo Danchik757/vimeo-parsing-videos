@@ -264,19 +264,32 @@ def load_assignment_results(results_path, manifest, selected_batches, logger):
     return loaded
 
 
-def recalculate_assignment_counts(global_results):
+def count_statuses(items):
     counts = {
         "downloaded": 0,
         "skipped": 0,
         "failed": 0,
+        "pending": 0,
         "finalized": 0,
     }
-    for item in global_results.get("items", []):
+    for item in items:
         status = item.get("status")
-        if status in counts:
-            counts[status] += 1
-        if status in FINALIZED_STATUSES:
+        if status == "downloaded":
+            counts["downloaded"] += 1
             counts["finalized"] += 1
+        elif status == "skipped":
+            counts["skipped"] += 1
+            counts["finalized"] += 1
+        elif status == "failed":
+            counts["failed"] += 1
+        else:
+            counts["pending"] += 1
+    return counts
+
+
+def recalculate_assignment_counts(global_results):
+    counts = count_statuses(global_results.get("items", []))
+    counts.pop("pending", None)
     global_results["counts"] = counts
     global_results["updated_at"] = now_string()
 
@@ -380,6 +393,50 @@ def save_worker_slot_summary(slot_dir, payload):
     write_json(Path(slot_dir) / "slot_summary.json", payload)
 
 
+def load_live_batch_counts(batch_results_path):
+    batch_results_path = Path(batch_results_path)
+    if not batch_results_path.exists():
+        return {
+            "downloaded": 0,
+            "skipped": 0,
+            "failed": 0,
+            "pending": 0,
+            "finalized": 0,
+        }
+
+    try:
+        payload = read_json(batch_results_path)
+    except Exception:
+        return {
+            "downloaded": 0,
+            "skipped": 0,
+            "failed": 0,
+            "pending": 0,
+            "finalized": 0,
+        }
+
+    return count_statuses(payload.get("items", []))
+
+
+def build_progress_snapshot(global_results, active_processes):
+    counts = dict(global_results.get("counts", {}))
+    counts.setdefault("downloaded", 0)
+    counts.setdefault("skipped", 0)
+    counts.setdefault("failed", 0)
+    counts.setdefault("finalized", 0)
+
+    worker_live = {}
+    for worker_name, item in active_processes.items():
+        live_counts = load_live_batch_counts(Path(item["batch_dir"]) / "results_manifest.json")
+        worker_live[worker_name] = live_counts
+        counts["downloaded"] += int(live_counts.get("downloaded", 0))
+        counts["skipped"] += int(live_counts.get("skipped", 0))
+        counts["failed"] += int(live_counts.get("failed", 0))
+        counts["finalized"] += int(live_counts.get("finalized", 0))
+
+    return {"counts": counts, "worker_live": worker_live}
+
+
 def build_batch_worker_config(master_config, batch_dir, source_json_path, batch_number, total_batches, worker_index, worker_count):
     worker_name = f"worker-{worker_index:02d}"
     batch_config = json.loads(json.dumps(master_config))
@@ -440,7 +497,8 @@ def next_pending_batch(state):
 
 
 def build_progress_lines(state, global_results, active_processes):
-    counts = global_results.get("counts", {})
+    snapshot = build_progress_snapshot(global_results, active_processes)
+    counts = snapshot["counts"]
     items = state.get("items", {})
     completed_batches = sum(1 for item in items.values() if item.get("status") == "completed")
     running_batches = sum(1 for item in items.values() if item.get("status") == "running")
@@ -458,8 +516,16 @@ def build_progress_lines(state, global_results, active_processes):
     ]
     for worker_name in sorted(active_processes):
         item = active_processes[worker_name]
+        live_counts = snapshot["worker_live"].get(worker_name, {})
         lines.append(
-            f"{worker_name} / batch <code>{item['batch_number']:04d}</code> / shard <code>{Path(item['source_json']).name}</code>"
+            (
+                f"{worker_name} / batch <code>{item['batch_number']:04d}</code> / "
+                f"shard <code>{Path(item['source_json']).name}</code> / "
+                f"d <code>{int(live_counts.get('downloaded', 0))}</code> / "
+                f"s <code>{int(live_counts.get('skipped', 0))}</code> / "
+                f"f <code>{int(live_counts.get('failed', 0))}</code> / "
+                f"p <code>{int(live_counts.get('pending', 0))}</code>"
+            )
         )
     return lines
 
@@ -685,6 +751,18 @@ def main():
                 exit_code = 1
                 slot_summaries[slot_name]["failed"] += 1
                 save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
+                if telegram.notify_on_error:
+                    telegram.notify_custom(
+                        "Assignment batch error",
+                        [
+                            f"worker: <code>{slot_name}</code>",
+                            f"batch: <code>{batch_number:04d}</code>",
+                            f"shard: <code>{Path(item['source_json']).name}</code>",
+                            f"exit_code: <code>{return_code}</code>",
+                            f"summary_exists: <code>{batch_summary_path.exists()}</code>",
+                            f"results_exists: <code>{batch_results_path.exists()}</code>",
+                        ],
+                    )
                 if master_config.get("batches", {}).get("stop_on_batch_error", True):
                     stop_requested = True
 

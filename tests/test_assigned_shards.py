@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from run_assigned_shards import (
+    build_progress_lines,
     load_assignment_state,
     normalize_assignment_manifest,
     resolve_manifest_source_json,
@@ -21,6 +22,57 @@ class _LoggerStub:
 
 
 class AssignedShardsTests(unittest.TestCase):
+    def test_build_progress_lines_include_live_active_batch_counts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            batch_dir = tmpdir / "batch_0001"
+            batch_dir.mkdir(parents=True, exist_ok=True)
+            (batch_dir / "results_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "total_urls": 7,
+                        "items": [
+                            {"url": "u1", "status": "downloaded"},
+                            {"url": "u2", "status": "skipped"},
+                            {"url": "u3", "status": "skipped"},
+                            {"url": "u4", "status": "failed"},
+                            {"url": "u5", "status": "pending"},
+                            {"url": "u6", "status": "pending"},
+                            {"url": "u7", "status": "pending"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            state = {
+                "items": {
+                    "1": {"batch_number": 1, "status": "running"},
+                    "2": {"batch_number": 2, "status": "pending"},
+                }
+            }
+            global_results = {
+                "total_urls": 100,
+                "counts": {"downloaded": 0, "skipped": 0, "failed": 0, "finalized": 0},
+            }
+            active_processes = {
+                "worker-01": {
+                    "batch_number": 1,
+                    "batch_dir": str(batch_dir),
+                    "source_json": str(batch_dir / "batch_0001.json"),
+                }
+            }
+
+            lines = build_progress_lines(state, global_results, active_processes)
+            self.assertIn("finalized_urls: <code>3/100 (3.0%)</code>", lines)
+            self.assertIn("downloaded: <code>1</code>", lines)
+            self.assertIn("skipped: <code>2</code>", lines)
+            self.assertIn("failed_logged: <code>1</code>", lines)
+            self.assertIn(
+                "worker-01 / batch <code>0001</code> / shard <code>batch_0001.json</code> / d <code>1</code> / s <code>2</code> / f <code>1</code> / p <code>3</code>",
+                lines,
+            )
+
     def test_resolve_manifest_source_json_falls_back_to_manifest_dir_filename(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
