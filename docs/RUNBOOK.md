@@ -59,6 +59,19 @@ Each server should have its own:
 - output root
 - storage root, for example `.../parse-1`, `.../parse-2`, `.../parse-3`
 
+For Telegram separation set the server label directly in:
+
+```json
+"runtime": {
+  "job_name": "parse-1"
+}
+```
+
+Then headers become:
+
+- `parse-1 | coordinator`
+- `parse-1 | worker-07`
+
 ## 4. Storage Mount
 
 Example for mounted storage on Linux:
@@ -115,6 +128,9 @@ For the current production pattern:
   "notify_on_start": true,
   "notify_on_finish": true,
   "notify_on_error": false,
+  "notify_download_every_n_successes": 0,
+  "notify_skip_every_n_processed": 0,
+  "notify_progress_every_n_processed": 0,
   "notify_progress_min_interval_seconds": 1800,
   "notify_coordinator_progress_every_seconds": 1800
 }
@@ -125,7 +141,9 @@ Meaning:
 - API/page parsing stays direct
 - only failed media downloads retry through WireGuard
 - worker starts are staggered to reduce Vimeo login collisions
-- Telegram stays useful but not noisy
+- worker download/skip/progress spam is disabled
+- worker start/finish still remains
+- coordinator progress is limited to once every 30 minutes
 
 ## 6. Start Metrics Collection
 

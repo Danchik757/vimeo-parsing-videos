@@ -38,8 +38,6 @@ output/run_name/
 │   │       └── 1058440992.json
 │   ├── not_downloaded/
 │   │   └── 1064731121.json
-│   └── no_links/
-│       └── 1069999999.json
 ├── workers/
 │   ├── coordinator.log
 │   ├── aggregate_summary.json
@@ -83,7 +81,7 @@ The project already stores metadata differently by bucket:
 
 - `downloaded/<id>/<id>.json`: richer record, because it backs downloaded media.
 - `not_downloaded/<id>.json`: compact video summary plus download facts.
-- `no_links/<id>.json`: compact video summary plus probe facts.
+- `no_links`: plain URL list plus manifest rows, without per-video JSON.
 
 ### What Can Be Reduced
 
@@ -144,6 +142,12 @@ Important flags:
 
 - `_download.downloadable = false`
 - `_download.download_link = null`
+
+These cases are tracked in:
+
+- `workers/no_links_urls.txt`
+- `workers/aggregate_results_manifest.json`
+- `workers/results_manifest.json` per worker
 
 ## What `video_id` Means
 

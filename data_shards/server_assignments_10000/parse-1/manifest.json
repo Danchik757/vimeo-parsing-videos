@@ -1,0 +1,153 @@
+{
+  "server_name": "parse-1",
+  "source_json": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/need_parse_unique.json",
+  "batch_size": 10000,
+  "shard_count": 24,
+  "total_urls": 240000,
+  "batches": [
+    {
+      "batch_number": 1,
+      "filename": "batch_0001.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0001.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 2,
+      "filename": "batch_0002.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0002.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 3,
+      "filename": "batch_0003.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0003.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 4,
+      "filename": "batch_0004.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0004.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 5,
+      "filename": "batch_0005.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0005.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 6,
+      "filename": "batch_0006.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0006.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 7,
+      "filename": "batch_0007.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0007.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 8,
+      "filename": "batch_0008.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0008.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 9,
+      "filename": "batch_0009.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0009.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 10,
+      "filename": "batch_0010.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0010.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 11,
+      "filename": "batch_0011.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0011.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 12,
+      "filename": "batch_0012.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0012.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 13,
+      "filename": "batch_0013.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0013.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 14,
+      "filename": "batch_0014.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0014.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 15,
+      "filename": "batch_0015.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0015.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 16,
+      "filename": "batch_0016.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0016.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 17,
+      "filename": "batch_0017.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0017.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 18,
+      "filename": "batch_0018.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0018.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 19,
+      "filename": "batch_0019.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0019.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 20,
+      "filename": "batch_0020.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0020.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 21,
+      "filename": "batch_0021.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0021.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 22,
+      "filename": "batch_0022.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0022.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 23,
+      "filename": "batch_0023.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0023.json",
+      "url_count": 10000
+    },
+    {
+      "batch_number": 24,
+      "filename": "batch_0024.json",
+      "path": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/batch_0024.json",
+      "url_count": 10000
+    }
+  ]
+}

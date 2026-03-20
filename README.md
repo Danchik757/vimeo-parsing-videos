@@ -65,7 +65,7 @@ Config:
 
 - `videos/downloaded/<id>/`: successfully downloaded original
 - `videos/not_downloaded/<id>.json`: downloadable later, but not downloaded now
-- `videos/no_links/<id>.json`: no usable download link
+- `workers/no_links_urls.txt`: no usable download link
 
 Coordinator also exports:
 

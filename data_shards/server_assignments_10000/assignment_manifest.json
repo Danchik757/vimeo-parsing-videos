@@ -1,0 +1,23 @@
+{
+  "source_json": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/need_parse_unique.json",
+  "total_urls": 694343,
+  "batch_size": 10000,
+  "total_shards": 70,
+  "servers": {
+    "parse-1": {
+      "shard_count": 24,
+      "total_urls": 240000,
+      "manifest": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-1/manifest.json"
+    },
+    "parse-2": {
+      "shard_count": 18,
+      "total_urls": 180000,
+      "manifest": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-2/manifest.json"
+    },
+    "parse-3": {
+      "shard_count": 28,
+      "total_urls": 274343,
+      "manifest": "/Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/data_shards/server_assignments_10000/parse-3/manifest.json"
+    }
+  }
+}

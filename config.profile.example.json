@@ -58,7 +58,7 @@
     "chromium_arg": "--disable-blink-features=AutomationControlled"
   },
   "runtime": {
-    "job_name": "Vimeo Original Downloader | parse-1",
+    "job_name": "parse-1",
     "worker_name": "worker-01",
     "worker_index": 1,
     "worker_count": 15,

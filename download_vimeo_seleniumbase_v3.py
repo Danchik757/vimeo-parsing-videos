@@ -1155,8 +1155,8 @@ def build_api_probe(response_status_code, response_payload):
     }
 
 
-def build_page_probe(result):
-    return {
+def build_page_probe(result, include_extended=False):
+    probe = {
         "visited": result.get("page_visited", False),
         "page_url": result.get("page_url"),
         "page_title": result.get("page_title"),
@@ -1166,12 +1166,34 @@ def build_page_probe(result):
         "download_button_found": result.get("button_found"),
         "download_link_found": result.get("download_link_found", False),
         "available_options_count": result.get("available_options_count", 0),
-        "available_options": result.get("available_options") or [],
         "best_option": normalize_download_option(result.get("page_best_option")),
         "has_original_option": result.get("has_original_option"),
         "error": result.get("probe_error"),
-        "context": result.get("page_context"),
     }
+    if include_extended:
+        probe["available_options"] = result.get("available_options") or []
+        probe["context"] = result.get("page_context")
+    return probe
+
+
+def get_no_links_list_path(config):
+    return Path(config["files"]["logs_dir"]) / "no_links_urls.txt"
+
+
+def record_no_links_url(config, video_url):
+    path = get_no_links_list_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = set()
+    if path.exists():
+        existing = {
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+    if video_url not in existing:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{video_url}\n")
+    return path
 
 
 def build_metadata_payload(
@@ -1187,9 +1209,10 @@ def build_metadata_payload(
 ):
     canonical_video_id = extract_canonical_video_id(video_id, json_data=json_data, result=result)
     bucket = get_metadata_bucket(status, result=result)
+    skip_no_links_json = bucket == "no_links" and status == "skipped"
     metadata_path = get_video_metadata_path(video_dir, canonical_video_id, status=status, result=result)
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    storage_dir = metadata_path.parent if bucket == "downloaded" else metadata_path.parent
+    if not skip_no_links_json:
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
     file_path = result.get("file_path")
     filename = result.get("filename")
@@ -1204,6 +1227,7 @@ def build_metadata_payload(
         json_data if status == "downloaded" and store_full_downloaded_payload else compact_video
     )
 
+    include_extended_page_probe = bucket == "downloaded" or status == "failed"
     payload = {
         "_saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "_video_id": canonical_video_id,
@@ -1226,11 +1250,17 @@ def build_metadata_payload(
             "download_link": result.get("download_link"),
         },
         "_api": api_probe,
-        "_page_probe": build_page_probe(result),
+        "_page_probe": build_page_probe(result, include_extended=include_extended_page_probe),
         "_storage": {
             "bucket": bucket,
-            "video_dir": str(get_video_storage_dir(video_dir, canonical_video_id) if bucket == "downloaded" else metadata_path.parent),
-            "metadata_path": str(metadata_path),
+            "video_dir": str(
+                get_video_storage_dir(video_dir, canonical_video_id)
+                if bucket == "downloaded"
+                else metadata_path.parent
+                if not skip_no_links_json
+                else Path(config["files"]["logs_dir"])
+            ),
+            "metadata_path": str(metadata_path) if not skip_no_links_json else None,
             "per_video_directory": bucket == "downloaded",
         },
         "_offload": {
@@ -1270,6 +1300,8 @@ def save_video_metadata(
         status,
         reason,
     )
+    if payload["_storage"]["bucket"] == "no_links" and status == "skipped":
+        return record_no_links_url(config, video_url)
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
     return metadata_path
