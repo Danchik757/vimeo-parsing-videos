@@ -1,63 +1,60 @@
-# Vimeo Video Downloader
+# Vimeo Downloader Docs
 
-Автоматическое скачивание видео с Vimeo через API.
+Repository:
+- `https://github.com/Danchik757/vimeo-parsing-videos.git`
 
-## Быстрый старт
+Current branch model:
+- `main`: shared base
+- `codex/parse-1-production`: branch for the first server
+- `codex/parse-2-production`: branch for the second server
 
-### 1. Установка (только первый раз)
+Current production model:
+- server queue runner: `run_assigned_shards.py`
+- worker process: `download_vimeo_seleniumbase_v3.py`
+- offload watcher: `scripts/offload_downloads.py`
+- output offload with `ffprobe` verification
+- automatic queue retries for failed shard batches
+
+Current parse-1 production behavior:
+- `download_only_original = true`
+- `vimeo_authenticated_session = true`
+- media download goes directly through `telegram-wg`
+- `batches.stop_on_batch_error = false`
+- `batches.max_batch_retries = 2`
+
+Main docs:
+- [PROJECT_README.md](PROJECT_README.md): project overview and current architecture
+- [RUNBOOK.md](RUNBOOK.md): setup, launch, restart, monitoring
+- [ARCHITECTURE.md](ARCHITECTURE.md): pipeline and state model
+- [SERVER_WORKERS_GUIDE.md](SERVER_WORKERS_GUIDE.md): short server-oriented notes
+- [PROJECT_MEMO.md](PROJECT_MEMO.md): historical notes and decisions
+
+parse-1 operator doc:
+- [`PARSE1_PRODUCTION_OPERATOR_GUIDE.txt`](../PARSE1_PRODUCTION_OPERATOR_GUIDE.txt)
+
+Shard references:
+- [DATA_SHARDS_SERVER_ASSIGNMENTS_10000_README.md](DATA_SHARDS_SERVER_ASSIGNMENTS_10000_README.md)
+- `data_shards/server_assignments_10000/parse-1/manifest.json`
+- `data_shards/server_assignments_10000/parse-2/manifest.json`
+- `data_shards/server_assignments_10000/parse-3/manifest.json`
+
+Quick production start pattern:
+
 ```bash
-# Виртуальное окружение уже создано и зависимости установлены
+cd /Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix
 source venv/bin/activate
+python run_assigned_shards.py \
+  --config config.parse-1.profile.json \
+  --manifest data_shards/server_assignments_10000/parse-1/manifest.json \
+  --workers 8
 ```
 
-### 2. Тестовый запуск (первые 100 видео)
-```bash
-./run.sh
-```
+Parallel offload watcher:
 
-или напрямую:
 ```bash
+cd /Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix
 source venv/bin/activate
-python download_vimeo.py
+python scripts/offload_downloads.py --config config.parse-1.profile.json --watch --delete-local-video
 ```
 
-### 3. Мониторинг
-В отдельном терминале:
-```bash
-tail -f download.log
-```
-
-## Настройки
-
-Файл `config.json`:
-- `test_mode: true` - тестирование на первых 100 видео
-- `test_mode: false` - обработка всех 694,343 видео
-- `test_limit` - количество видео в тестовом режиме
-
-## Структура
-- `need_parse_unique.json` - 694,343 URL для скачивания
-- `videos/` - скачанные видео
-- `jsons/` - метаданные каждого видео
-- `download.log` - логи работы
-- `failed_downloads.json` - ошибки скачивания
-
-## Troubleshooting
-
-**Ошибка 401/403:**
-- Токен Vimeo API истёк
-- Обновите `config.json` → `vimeo_api.token`
-
-**"Captcha/verification detected":**
-- Vimeo показывает капчу
-- Скрипт автоматически делает retry
-- Видео пропускается после 3 попыток
-
-**ModuleNotFoundError:**
-```bash
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-## Подробная документация
-
-Смотри [PROJECT_MEMO.md](PROJECT_MEMO.md) для полной информации о проекте.
+For real operational details, use `RUNBOOK.md` and `PARSE1_PRODUCTION_OPERATOR_GUIDE.txt`.
