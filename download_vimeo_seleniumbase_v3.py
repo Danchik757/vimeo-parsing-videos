@@ -89,6 +89,14 @@ def load_config(config_path):
     settings.setdefault("store_full_api_payload_for_downloaded", True)
     settings.setdefault("download_interface", "")
     settings.setdefault("download_retry_interface", "")
+    settings.setdefault(
+        "direct_download_timeout_seconds",
+        int(settings.get("download_timeout", 600)),
+    )
+    settings.setdefault(
+        "curl_stall_timeout_seconds",
+        int(settings.get("download_timeout", 600)),
+    )
     settings.setdefault("login_completion_timeout_seconds", 30)
     settings.setdefault("login_retry_attempts", 3)
     settings.setdefault("login_retry_delay_seconds", 10)
@@ -567,7 +575,12 @@ def download_file_via_curl(url, local_filename, runtime_state, logger, config, v
     settings = config["settings"]
     resume = config["resume"]
     connect_timeout = int(settings.get("connect_timeout", 30))
-    read_timeout = int(settings.get("download_timeout", 600))
+    read_timeout = int(
+        settings.get(
+            "curl_stall_timeout_seconds",
+            settings.get("download_timeout", 600),
+        )
+    )
     progress_log_every = int(settings.get("download_progress_log_seconds", 15))
     download_interface = (interface_name or settings.get("download_interface") or "").strip()
 
@@ -681,7 +694,12 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id):
 
     chunk_size = int(settings.get("download_chunk_size_kb", 1024)) * 1024
     connect_timeout = int(settings.get("connect_timeout", 30))
-    read_timeout = int(settings.get("download_timeout", 600))
+    read_timeout = int(
+        settings.get(
+            "direct_download_timeout_seconds",
+            settings.get("download_timeout", 600),
+        )
+    )
     progress_log_every = int(settings.get("download_progress_log_seconds", 15))
 
     local_path = Path(local_filename)

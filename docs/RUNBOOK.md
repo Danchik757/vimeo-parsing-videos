@@ -117,7 +117,9 @@ For the current production pattern:
 "settings": {
   "download_only_original": true,
   "download_interface": "",
-  "download_retry_interface": "telegram-wg"
+  "download_retry_interface": "telegram-wg",
+  "direct_download_timeout_seconds": 10,
+  "curl_stall_timeout_seconds": 600
 },
 "workers": {
   "count": 15,
@@ -139,6 +141,7 @@ For the current production pattern:
 Meaning:
 
 - API/page parsing stays direct
+- direct Vimeo media path is checked quickly and falls back after 10 seconds
 - only failed media downloads retry through WireGuard
 - worker starts are staggered to reduce Vimeo login collisions
 - worker download/skip/progress spam is disabled
@@ -180,6 +183,21 @@ cd /Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix
 source venv/bin/activate
 python run_workers.py --config config.parse-1.profile.json --workers 15
 ```
+
+If you already prepared fixed `10000`-URL shards for a server, for example:
+
+- `data_shards/server_assignments_10000/parse-1/manifest.json`
+
+and want each worker slot to keep pulling the next unfinished shard until the queue is empty, use:
+
+```bash
+python run_assigned_shards.py \
+  --config config.parse-1.profile.json \
+  --manifest data_shards/server_assignments_10000/parse-1/manifest.json \
+  --workers 15
+```
+
+This queue mode is the recommended production path when shard difficulty is uneven, because worker slots are no longer tied to exactly `3` shard files each.
 
 If your login credentials are not stored in `vimeo_login`, you can still override by environment:
 

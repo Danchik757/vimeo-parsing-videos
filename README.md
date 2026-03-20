@@ -13,6 +13,7 @@ Production-oriented Vimeo parser/downloader for large URL lists with:
 ## Main Entry Points
 
 - `run_workers.py`: shard one input list across N workers
+- `run_assigned_shards.py`: dynamic queue runner for pre-generated `parse-1/parse-2/parse-3` shard manifests
 - `download_vimeo_seleniumbase_v3.py`: single worker
 - `scripts/offload_downloads.py`: verified upload of completed downloads to mounted storage
 - `scripts/collect_system_metrics.sh`: machine metrics over time
@@ -57,7 +58,9 @@ Config:
 ```json
 "settings": {
   "download_interface": "",
-  "download_retry_interface": "telegram-wg"
+  "download_retry_interface": "telegram-wg",
+  "direct_download_timeout_seconds": 10,
+  "curl_stall_timeout_seconds": 600
 }
 ```
 
