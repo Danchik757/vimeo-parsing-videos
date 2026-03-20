@@ -1,0 +1,501 @@
+PARSE-1 PRODUCTION OPERATOR GUIDE
+================================
+
+This file describes the current production run setup for parse-1 on the server.
+It is written for the actual queue-based launcher and offload watcher now used in
+the repository.
+
+
+1. WHAT IS RUNNING
+------------------
+
+Production parser command:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  source venv/bin/activate
+  python run_assigned_shards.py \
+    --config config.parse-1.profile.json \
+    --manifest data_shards/server_assignments_10000/parse-1/manifest.json \
+    --workers 8
+
+Offload watcher command:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  source venv/bin/activate
+  python scripts/offload_downloads.py --config config.parse-1.profile.json --watch --delete-local-video
+
+Current production intent:
+
+- server label: parse-1
+- worker slots: 8
+- authenticated Vimeo session: enabled
+- only Original videos are downloaded
+- media download goes directly through telegram-wg
+- completed downloaded videos are offloaded to mimas
+- local media file is deleted after verified upload
+
+
+2. WHAT EXACTLY THE PARSER DOES
+-------------------------------
+
+Input source:
+
+- config.parse-1.profile.json points to need_parse_unique.json as the master URL source
+- the queue runner actually uses:
+  data_shards/server_assignments_10000/parse-1/manifest.json
+
+Manifest scope:
+
+- parse-1 has 24 shard files
+- each shard is usually 10000 URLs
+- total for parse-1 is about 240000 URLs
+
+Queue behavior:
+
+- there are 8 worker slots, not 8 fixed worker lists
+- at start, slots pick batches 0001..0008
+- when a slot finishes its current batch, it picks the next pending batch
+- a fast slot may process more batches than a slow one
+- this is better than fixed assignment because heavy Original batches do not leave
+  fast workers idle
+
+Important difference from run_workers.py:
+
+- run_workers.py splits one input list once and every worker stays on its fixed shard
+- run_assigned_shards.py keeps a dynamic queue of batch files and reuses freed slots
+
+
+3. CURRENT PARSE-1 SETTINGS
+---------------------------
+
+Important effective settings from config.parse-1.profile.json:
+
+- runtime.job_name = parse-1
+- runtime.worker_count = 8
+- runtime.vimeo_authenticated_session = true
+- workers.count = 8
+- workers.stagger_start_seconds = 30
+- workers.shared_media_dirs = true
+- settings.download_only_original = true
+- settings.download_interface = telegram-wg
+- settings.download_retry_interface = ""
+- settings.direct_download_timeout_seconds = 10
+- settings.curl_stall_timeout_seconds = 60
+- offload.enabled = true
+- offload.storage_root = /home/msu_cc/mount/mimas/vimeo/2025scraped/parse-1
+- offload.delete_local_video_after_upload = true
+- offload.validate_with_ffprobe = true
+
+Meaning:
+
+- page/API/login flow is normal browser/API work
+- file download itself is forced through telegram-wg immediately
+- there is no direct-first media attempt for parse-1
+- curl may keep running while data arrives normally
+- if curl speed drops below 1 byte/sec for 60 seconds, curl fails
+- partial downloads are resumable because resume_partial_downloads = true
+
+
+4. IMPORTANT OUTPUT PATHS
+-------------------------
+
+Main output root:
+
+  /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1
+
+Coordinator files:
+
+- workers/coordinator.log
+- workers/assignment_state.json
+- workers/aggregate_summary.json
+- workers/aggregate_results_manifest.json
+- workers/downloaded_original_urls.txt
+- workers/not_downloaded_downloadable_urls.txt
+- workers/no_links_urls.txt
+
+Per-slot files:
+
+- workers/worker_01/slot_summary.json
+- workers/worker_02/slot_summary.json
+- ...
+
+Per-batch files:
+
+- shards/batch_0001/config.json
+- shards/batch_0001/download.log
+- shards/batch_0001/results_manifest.json
+- shards/batch_0001/summary.json
+- shards/batch_0001/resume_state.json
+- shards/batch_0001/failed_downloads.json
+
+Shared media buckets:
+
+- videos/downloaded/<video_id>/<video_id>.mp4
+- videos/downloaded/<video_id>/<video_id>.json
+- videos/not_downloaded/<video_id>.json
+
+No-link storage:
+
+- workers/no_links_urls.txt
+
+Offload files:
+
+- offload.log
+- offload_registry.json
+
+
+5. WHAT HAPPENS TO EACH VIDEO
+-----------------------------
+
+For every Vimeo URL:
+
+1. video_id is extracted
+2. Vimeo API is queried
+3. if download is impossible, the URL is not downloaded
+4. if the page must be checked, SeleniumBase opens the Vimeo page
+5. if auth is required, worker logs in with the configured Vimeo account
+6. worker opens the Download menu and collects download options
+7. because download_only_original = true:
+   - if Original exists, it is downloaded
+   - if download exists but Original does not exist, a compact JSON is saved to videos/not_downloaded
+   - if there is no usable link, the URL is added to workers/no_links_urls.txt
+8. downloaded videos are then picked up by offload watcher
+9. watcher copies media + metadata to mimas
+10. watcher verifies the media with ffprobe
+11. watcher updates offload_registry.json and _offload metadata
+12. watcher deletes the local media file if upload was verified
+
+
+6. HOW TO START THE RUN
+-----------------------
+
+Recommended clean start:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  tmux kill-server 2>/dev/null || true
+  pkill -f run_assigned_shards.py
+  pkill -f run_workers.py
+  pkill -f download_vimeo_seleniumbase_v3.py
+  pkill -f offload_downloads.py
+  pkill -f chromedriver
+  pkill -f '/opt/google/chrome/chrome'
+  rm -rf /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1
+  mkdir -p /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1
+
+Parser tmux session:
+
+  tmux new -s parse1-parser
+
+Inside parser tmux:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  source venv/bin/activate
+  python run_assigned_shards.py \
+    --config config.parse-1.profile.json \
+    --manifest data_shards/server_assignments_10000/parse-1/manifest.json \
+    --workers 8
+
+Offload tmux session:
+
+  tmux new -s parse1-offload
+
+Inside offload tmux:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  source venv/bin/activate
+  python scripts/offload_downloads.py --config config.parse-1.profile.json --watch --delete-local-video
+
+
+7. HOW TO MONITOR THE RUN
+-------------------------
+
+Coordinator log:
+
+  tail -f /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/workers/coordinator.log
+
+Offload log:
+
+  tail -f /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/offload.log
+
+Queue state:
+
+  python -m json.tool /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/workers/assignment_state.json | less
+
+Latest successful WG downloads:
+
+  grep -R "via curl on interface telegram-wg\\|Successfully downloaded" -n \
+    /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/shards/batch_*/download.log | tail -n 50
+
+Login failures:
+
+  grep -R "Login appears incomplete\\|login_failure_attempt" -n \
+    /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/shards/batch_*/download.log
+
+Per-batch log example:
+
+  tail -f /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/shards/batch_0001/download.log
+
+Result lists:
+
+  ls -lh /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/workers/*urls.txt
+
+Processes:
+
+  pgrep -af 'run_assigned_shards.py|download_vimeo_seleniumbase_v3.py|offload_downloads.py|chromedriver|/opt/google/chrome/chrome'
+
+
+8. HOW TO READ assignment_state.json
+------------------------------------
+
+Each batch has a state item:
+
+- pending
+- running
+- completed
+- failed
+
+Meaning:
+
+- pending: batch was not started yet
+- running: batch is currently assigned to one active worker slot
+- completed: batch finished and summary/results were collected
+- failed: batch process exited badly or required output files were missing
+
+This file is the main truth source for queue progress.
+
+
+9. HOW TO READ aggregate_summary.json
+------------------------------------
+
+This is the high-level summary of the whole parse-1 queue run.
+
+Useful fields:
+
+- total_batches
+- total_urls
+- downloaded
+- skipped
+- failed
+- finalized
+- completed_batches
+- running_batches
+- pending_batches
+- failed_batches
+
+
+10. HOW OFFLOAD RESTART WORKS
+-----------------------------
+
+Offload watcher is restart-safe.
+
+It uses:
+
+- offload_registry.json
+- _offload field inside local downloaded metadata JSON
+
+If a video was already uploaded and remote file still exists:
+
+- watcher does not upload it again
+- if local media still exists and delete-local-video is enabled, watcher may delete it
+
+If local media is already deleted but metadata says uploaded:
+
+- watcher does not re-upload
+
+If remote file is missing but local media still exists:
+
+- watcher can upload again
+
+Important:
+
+- do not delete offload_registry.json during an active production run
+- do not delete downloaded metadata JSON during an active production run
+
+
+11. HOW TO RESTART AFTER INTERRUPTION
+-------------------------------------
+
+If parser stops unexpectedly:
+
+1. keep output/runs/parse-1 intact
+2. restart parser with the same command
+3. restart offload watcher with the same command
+
+Why this works:
+
+- assignment_state.json resets stale running batches back to pending
+- each batch has its own resume_state.json
+- partial downloads can resume
+- already uploaded files are tracked by offload_registry.json
+
+Restart parser:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  source venv/bin/activate
+  python run_assigned_shards.py \
+    --config config.parse-1.profile.json \
+    --manifest data_shards/server_assignments_10000/parse-1/manifest.json \
+    --workers 8
+
+Restart offload watcher:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  source venv/bin/activate
+  python scripts/offload_downloads.py --config config.parse-1.profile.json --watch --delete-local-video
+
+
+12. HOW TO STOP SAFELY
+----------------------
+
+If running inside tmux:
+
+- attach to the parser session and press Ctrl-C
+- attach to the offload session and press Ctrl-C
+
+If you need force stop:
+
+  pkill -f run_assigned_shards.py
+  pkill -f download_vimeo_seleniumbase_v3.py
+  pkill -f offload_downloads.py
+  pkill -f chromedriver
+  pkill -f '/opt/google/chrome/chrome'
+
+
+13. COMMON FAILURE CASES
+------------------------
+
+A. Batch fails immediately with missing summary/results
+
+What it usually means:
+
+- batch worker died before finishing setup
+- source_json path in manifest was wrong
+- config/secrets loading failed
+
+Where to look:
+
+- workers/coordinator.log
+- shards/batch_0001/download.log
+
+
+B. Login appears incomplete
+
+What it means:
+
+- Vimeo login flow did not complete
+- account challenge or page timing issue
+
+Where to look:
+
+- grep login errors in shard logs
+- check login_failure_attempt_*.html if present in batch dir
+
+
+C. No downloads happen, only Original detection
+
+What it usually means:
+
+- download path is broken
+- wrong interface
+- curl cannot use the requested WG interface
+
+Where to look:
+
+- grep "via curl on interface telegram-wg"
+- grep "Successfully downloaded"
+- inspect the current batch download.log
+
+
+D. Offload fails with ffprobe
+
+What it means:
+
+- ffprobe is missing or media validation failed
+
+Checks:
+
+  command -v ffprobe
+  ffprobe -version | head
+
+
+E. Offload does not upload anything
+
+Possible reasons:
+
+- parser has not finished any video yet
+- only .part files exist
+- local media file is too new for min_file_age_seconds
+- storage_root is wrong
+
+Where to look:
+
+- offload.log
+- videos/downloaded/<id>/
+
+
+14. QUICK DIAGNOSTIC COMMANDS
+-----------------------------
+
+Last coordinator lines:
+
+  tail -n 80 /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/workers/coordinator.log
+
+Last offload lines:
+
+  tail -n 80 /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/offload.log
+
+Last lines from batch 0001:
+
+  tail -n 80 /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/shards/batch_0001/download.log
+
+Count uploaded originals already offloaded:
+
+  python - <<'PY'
+import json
+from pathlib import Path
+p = Path('/29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/offload_registry.json')
+if not p.exists():
+    print(0)
+else:
+    data = json.loads(p.read_text(encoding='utf-8'))
+    print(sum(1 for item in data.get('items', {}).values() if item.get('status') == 'uploaded'))
+PY
+
+Show current active batch processes:
+
+  pgrep -af 'download_vimeo_seleniumbase_v3.py'
+
+
+15. WHAT TO KEEP AND WHAT NOT TO DELETE
+---------------------------------------
+
+Safe to keep across restarts:
+
+- config.parse-1.profile.json
+- config.parse-1.secrets.json
+- data_shards/server_assignments_10000/parse-1/
+- output/runs/parse-1/workers/assignment_state.json
+- output/runs/parse-1/shards/batch_*/resume_state.json
+- output/runs/parse-1/offload_registry.json
+- output/runs/parse-1/videos/downloaded/*/*.json
+
+Do not delete during an active production run:
+
+- output/runs/parse-1
+- offload_registry.json
+- batch resume_state.json files
+- downloaded metadata JSON files
+
+
+16. CURRENT RECOMMENDED OPERATING MODE
+--------------------------------------
+
+For parse-1, use:
+
+- run_assigned_shards.py
+- 8 worker slots
+- telegram-wg as direct media interface
+- offload watcher in parallel
+
+Do not use the old fixed-shard run_workers.py mode for the main parse-1 production run.
+
