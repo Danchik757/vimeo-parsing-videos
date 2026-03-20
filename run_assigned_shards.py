@@ -804,7 +804,7 @@ def main():
         now = time.time()
         if progress_every_seconds > 0 and now - last_progress_ts >= progress_every_seconds:
             telegram.notify_custom(
-                "Assignment queue progress",
+                "Coordinator progress",
                 build_progress_lines(state, global_results, active_processes),
             )
             last_progress_ts = now
