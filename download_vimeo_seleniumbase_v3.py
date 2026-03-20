@@ -152,6 +152,7 @@ def load_config(config_path):
     batches.setdefault("auto_advance", True)
     batches.setdefault("reuse_existing_shards", True)
     batches.setdefault("stop_on_batch_error", True)
+    batches.setdefault("max_batch_retries", 0)
     batches.setdefault("max_batches", 0)
     batches.setdefault("shards_dir", "data_shards/generated_batches")
     batches.setdefault("runs_dir", "output/batches/runs")

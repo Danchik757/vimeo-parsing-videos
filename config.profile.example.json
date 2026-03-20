@@ -96,5 +96,9 @@
     "stagger_start_seconds": 30,
     "shared_media_dirs": true,
     "api_pool": []
+  },
+  "batches": {
+    "stop_on_batch_error": false,
+    "max_batch_retries": 2
   }
 }

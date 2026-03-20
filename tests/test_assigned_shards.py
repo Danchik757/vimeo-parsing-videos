@@ -5,6 +5,7 @@ from pathlib import Path
 
 from run_assigned_shards import (
     build_progress_lines,
+    handle_batch_failure,
     load_assignment_state,
     normalize_assignment_manifest,
     resolve_manifest_source_json,
@@ -22,6 +23,50 @@ class _LoggerStub:
 
 
 class AssignedShardsTests(unittest.TestCase):
+    def test_handle_batch_failure_requeues_with_remaining_retries(self):
+        state_item = {
+            "status": "running",
+            "assigned_worker": "worker-06",
+            "retry_count": 0,
+        }
+
+        outcome = handle_batch_failure(
+            state_item,
+            batch_number=6,
+            return_code=1,
+            summary_exists=True,
+            results_exists=True,
+            batches_config={"stop_on_batch_error": False, "max_batch_retries": 2},
+        )
+
+        self.assertTrue(outcome["requeued"])
+        self.assertFalse(outcome["stop_requested"])
+        self.assertEqual(state_item["status"], "pending")
+        self.assertIsNone(state_item["assigned_worker"])
+        self.assertEqual(state_item["retry_count"], 1)
+        self.assertEqual(state_item["last_error"]["batch_number"], 6)
+
+    def test_handle_batch_failure_becomes_failed_after_retry_limit(self):
+        state_item = {
+            "status": "running",
+            "assigned_worker": "worker-06",
+            "retry_count": 2,
+        }
+
+        outcome = handle_batch_failure(
+            state_item,
+            batch_number=6,
+            return_code=1,
+            summary_exists=True,
+            results_exists=True,
+            batches_config={"stop_on_batch_error": False, "max_batch_retries": 2},
+        )
+
+        self.assertFalse(outcome["requeued"])
+        self.assertFalse(outcome["stop_requested"])
+        self.assertEqual(state_item["status"], "failed")
+        self.assertEqual(state_item["retry_count"], 2)
+
     def test_build_progress_lines_include_live_active_batch_counts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
@@ -188,6 +233,7 @@ class AssignedShardsTests(unittest.TestCase):
             loaded = load_assignment_state(state_path, manifest, selected, _LoggerStub())
             self.assertEqual(loaded["items"]["1"]["status"], "pending")
             self.assertIsNone(loaded["items"]["1"]["assigned_worker"])
+            self.assertEqual(loaded["items"]["1"]["retry_count"], 0)
 
 
 if __name__ == "__main__":

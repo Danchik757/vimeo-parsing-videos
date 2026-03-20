@@ -159,6 +159,8 @@ def build_assignment_state(manifest, selected_batches):
             "finished_at": None,
             "exit_code": None,
             "batch_dir": None,
+            "retry_count": 0,
+            "last_error": None,
         }
     return {
         "manifest_path": manifest["manifest_path"],
@@ -191,6 +193,8 @@ def load_assignment_state(state_path, manifest, selected_batches, logger):
         key = str(batch["batch_number"])
         item = dict(default_state["items"][key])
         item.update(loaded_items.get(key, {}))
+        item["retry_count"] = max(0, int(item.get("retry_count", 0) or 0))
+        item.setdefault("last_error", None)
         if item.get("status") == "running":
             item["status"] = "pending"
             item["assigned_worker"] = None
@@ -481,6 +485,40 @@ def build_batch_worker_config(master_config, batch_dir, source_json_path, batch_
     return worker_name, batch_config
 
 
+def handle_batch_failure(state_item, batch_number, return_code, summary_exists, results_exists, batches_config):
+    retry_count = max(0, int(state_item.get("retry_count", 0) or 0))
+    max_batch_retries = max(0, int((batches_config or {}).get("max_batch_retries", 0) or 0))
+
+    failure_info = {
+        "at": now_string(),
+        "batch_number": int(batch_number),
+        "exit_code": return_code,
+        "summary_exists": bool(summary_exists),
+        "results_exists": bool(results_exists),
+    }
+    state_item["last_error"] = failure_info
+
+    if retry_count < max_batch_retries:
+        next_retry = retry_count + 1
+        state_item["status"] = "pending"
+        state_item["assigned_worker"] = None
+        state_item["retry_count"] = next_retry
+        return {
+            "requeued": True,
+            "retry_count": next_retry,
+            "max_batch_retries": max_batch_retries,
+            "stop_requested": False,
+        }
+
+    state_item["status"] = "failed"
+    return {
+        "requeued": False,
+        "retry_count": retry_count,
+        "max_batch_retries": max_batch_retries,
+        "stop_requested": bool((batches_config or {}).get("stop_on_batch_error", True)),
+    }
+
+
 def reset_running_batches_to_pending(state):
     for item in state.get("items", {}).values():
         if item.get("status") == "running":
@@ -740,31 +778,63 @@ def main():
                     int(batch_summary.get("failed", 0)),
                 )
             else:
-                state_item["status"] = "failed"
-                logger.error(
-                    "Batch %04d failed or is missing output files (exit_code=%s, summary=%s, results=%s)",
+                failure_action = handle_batch_failure(
+                    state_item,
                     batch_number,
                     return_code,
                     batch_summary_path.exists(),
                     batch_results_path.exists(),
+                    master_config.get("batches", {}),
                 )
-                exit_code = 1
                 slot_summaries[slot_name]["failed"] += 1
                 save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
-                if telegram.notify_on_error:
-                    telegram.notify_custom(
-                        "Assignment batch error",
-                        [
-                            f"worker: <code>{slot_name}</code>",
-                            f"batch: <code>{batch_number:04d}</code>",
-                            f"shard: <code>{Path(item['source_json']).name}</code>",
-                            f"exit_code: <code>{return_code}</code>",
-                            f"summary_exists: <code>{batch_summary_path.exists()}</code>",
-                            f"results_exists: <code>{batch_results_path.exists()}</code>",
-                        ],
+                if failure_action["requeued"]:
+                    logger.warning(
+                        "Batch %04d failed (exit_code=%s, summary=%s, results=%s). Re-queueing retry %d/%d",
+                        batch_number,
+                        return_code,
+                        batch_summary_path.exists(),
+                        batch_results_path.exists(),
+                        int(failure_action["retry_count"]),
+                        int(failure_action["max_batch_retries"]),
                     )
-                if master_config.get("batches", {}).get("stop_on_batch_error", True):
-                    stop_requested = True
+                    if telegram.notify_on_error:
+                        telegram.notify_custom(
+                            "Assignment batch retry",
+                            [
+                                f"worker: <code>{slot_name}</code>",
+                                f"batch: <code>{batch_number:04d}</code>",
+                                f"shard: <code>{Path(item['source_json']).name}</code>",
+                                f"exit_code: <code>{return_code}</code>",
+                                f"retry: <code>{int(failure_action['retry_count'])}/{int(failure_action['max_batch_retries'])}</code>",
+                                f"summary_exists: <code>{batch_summary_path.exists()}</code>",
+                                f"results_exists: <code>{batch_results_path.exists()}</code>",
+                            ],
+                        )
+                else:
+                    logger.error(
+                        "Batch %04d failed or is missing output files (exit_code=%s, summary=%s, results=%s)",
+                        batch_number,
+                        return_code,
+                        batch_summary_path.exists(),
+                        batch_results_path.exists(),
+                    )
+                    exit_code = 1
+                    if telegram.notify_on_error:
+                        telegram.notify_custom(
+                            "Assignment batch error",
+                            [
+                                f"worker: <code>{slot_name}</code>",
+                                f"batch: <code>{batch_number:04d}</code>",
+                                f"shard: <code>{Path(item['source_json']).name}</code>",
+                                f"exit_code: <code>{return_code}</code>",
+                                f"retries_exhausted: <code>{int(failure_action['retry_count'])}/{int(failure_action['max_batch_retries'])}</code>",
+                                f"summary_exists: <code>{batch_summary_path.exists()}</code>",
+                                f"results_exists: <code>{batch_results_path.exists()}</code>",
+                            ],
+                        )
+                    if failure_action["stop_requested"]:
+                        stop_requested = True
 
             save_assignment_state(state_path, state)
             aggregate_summary = build_assignment_summary(
