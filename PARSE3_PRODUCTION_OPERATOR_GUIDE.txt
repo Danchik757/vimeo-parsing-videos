@@ -1,0 +1,211 @@
+PARSE-3 PRODUCTION OPERATOR GUIDE
+================================
+
+This file describes the current production run setup for parse-3 on server #3.
+It follows the same queue-based parser + offload watcher model as parse-1.
+
+
+1. WHAT IS RUNNING
+------------------
+
+Production parser command:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  source venv/bin/activate
+  python run_assigned_shards.py \
+    --config config.parse-3.profile.json \
+    --manifest data_shards/server_assignments_10000/parse-3/manifest.json \
+    --workers 10
+
+Offload watcher command:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  source venv/bin/activate
+  python scripts/offload_downloads.py --config config.parse-3.profile.json --watch --delete-local-video
+
+Current production intent:
+
+- server label: parse-3
+- worker slots: 10
+- authenticated Vimeo session: enabled
+- only Original videos are downloaded
+- media download goes directly through wg-vimeo
+- completed downloaded videos are offloaded to mimas
+- local media file is deleted after verified upload
+
+
+2. CURRENT PARSE-3 SETTINGS
+---------------------------
+
+Important effective settings from config.parse-3.profile.json:
+
+- runtime.job_name = parse-3
+- runtime.worker_count = 10
+- runtime.vimeo_authenticated_session = true
+- workers.count = 10
+- workers.stagger_start_seconds = 45
+- workers.shared_media_dirs = true
+- settings.download_only_original = true
+- settings.download_interface = wg-vimeo
+- settings.download_retry_interface = ""
+- settings.api_401_fallback_to_page = true
+- telegram.enabled = true
+- telegram.source_address = 10.8.0.6
+- telegram.notify_on_start = true
+- telegram.notify_on_finish = true
+- telegram.notify_on_error = false
+- telegram.notify_on_ip_block = true
+- telegram.notify_on_stall = true
+- offload.enabled = true
+- offload.storage_root = /29d_kon/mount/mimas/vimeo/2025scraped/parse-3
+- offload.delete_local_video_after_upload = true
+- offload.validate_with_ffprobe = true
+- batches.stop_on_batch_error = false
+- batches.max_batch_retries = 2
+
+Meaning:
+
+- coordinator sends Telegram start/progress/finish messages
+- coordinator finish/progress includes current remote storage size for parse-3
+- launched workers are quiet in Telegram by default
+- worker Telegram should only alert on stall or IP block
+- parser and offload watcher use the same config profile
+
+
+3. IMPORTANT OUTPUT PATHS
+-------------------------
+
+Main local output root:
+
+  /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-3
+
+Remote storage root:
+
+  /29d_kon/mount/mimas/vimeo/2025scraped/parse-3
+
+Coordinator files:
+
+- workers/coordinator.log
+- workers/assignment_state.json
+- workers/aggregate_summary.json
+- workers/aggregate_results_manifest.json
+- workers/downloaded_original_urls.txt
+- workers/not_downloaded_downloadable_urls.txt
+- workers/no_links_urls.txt
+- workers/transcript_modal_urls.txt
+
+Per-slot files:
+
+- workers/worker_01/slot_summary.json
+- workers/worker_02/slot_summary.json
+- ...
+
+Per-batch files:
+
+- shards/batch_0043/config.json
+- shards/batch_0043/download.log
+- shards/batch_0043/results_manifest.json
+- shards/batch_0043/summary.json
+- shards/batch_0043/resume_state.json
+- shards/batch_0043/failed_downloads.json
+
+Offload files:
+
+- offload.log
+- offload_registry.json
+
+
+4. HOW TO START THE RUN
+-----------------------
+
+Parser tmux session:
+
+  tmux new -s parse3-parser
+
+Inside parser tmux:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  source venv/bin/activate
+  python run_assigned_shards.py \
+    --config config.parse-3.profile.json \
+    --manifest data_shards/server_assignments_10000/parse-3/manifest.json \
+    --workers 10
+
+Offload tmux session:
+
+  tmux new -s parse3-offload
+
+Inside offload tmux:
+
+  cd /29d_kon/projects/vimeo-parsing-videos
+  source venv/bin/activate
+  python scripts/offload_downloads.py --config config.parse-3.profile.json --watch --delete-local-video
+
+
+5. HOW TO MONITOR THE RUN
+-------------------------
+
+Coordinator log:
+
+  tail -f /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-3/workers/coordinator.log
+
+Offload log:
+
+  tail -f /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-3/offload.log
+
+Queue state:
+
+  python -m json.tool /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-3/workers/assignment_state.json | less
+
+Aggregate summary:
+
+  cat /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-3/workers/aggregate_summary.json
+
+Result URL lists:
+
+  ls -lh /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-3/workers/*urls.txt
+
+Transcript-only problem list:
+
+  cat /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-3/workers/transcript_modal_urls.txt
+
+Processes:
+
+  pgrep -af 'run_assigned_shards.py|download_vimeo_seleniumbase_v3.py|offload_downloads.py|chromedriver|/opt/google/chrome/chrome'
+
+
+6. HOW TO READ THE MAIN RESULT LISTS
+------------------------------------
+
+- downloaded_original_urls.txt
+  URLs that were successfully downloaded as Original
+
+- not_downloaded_downloadable_urls.txt
+  URLs where download existed, but Original was not selected or the video was otherwise downloadable but not downloaded
+
+- no_links_urls.txt
+  URLs where there was no usable download link
+
+- transcript_modal_urls.txt
+  URLs where Vimeo opened transcript download UI instead of video download UI
+
+- failed_downloads.json
+  Per-batch/per-worker fail log. This is broader than transcript cases and may include
+  timeouts, missing buttons, modal parsing failures, and other true errors.
+
+
+7. STOP / RESTART
+-----------------
+
+Stop parser:
+
+  pkill -f run_assigned_shards.py
+
+Stop offload watcher:
+
+  pkill -f "scripts/offload_downloads.py --config config.parse-3.profile.json"
+
+Attach to tmux:
+
+  tmux attach -t parse3-parser
+  tmux attach -t parse3-offload
