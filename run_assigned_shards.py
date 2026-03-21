@@ -947,6 +947,7 @@ def main():
             f"downloaded_urls: <code>{exported_lists['downloaded_original']}</code>",
             f"not_downloaded_urls: <code>{exported_lists['not_downloaded_downloadable']}</code>",
             f"no_links_urls: <code>{exported_lists['no_links']}</code>",
+            f"transcript_modal_urls: <code>{exported_lists['transcript_modal']}</code>",
         ],
         wait=True,
     )
