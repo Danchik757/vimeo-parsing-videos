@@ -42,7 +42,7 @@
     "download_progress_log_seconds": 15,
     "download_only_original": true,
     "store_full_api_payload_for_downloaded": true,
-    "download_interface": "",
+    "download_interface": "wg-vimeo",
     "download_retry_interface": "",
     "api_401_fallback_to_page": true,
     "direct_download_timeout_seconds": 180,
