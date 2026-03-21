@@ -11,9 +11,9 @@
     "results_file": "output/runs/parse-3/results_manifest.json"
   },
   "telegram": {
-    "enabled": false,
+    "enabled": true,
     "api_base_url": "https://api.telegram.org",
-    "source_address": "10.8.0.5",
+    "source_address": "10.8.0.6",
     "notify_download_every_n_successes": 0,
     "notify_skip_every_n_processed": 0,
     "notify_progress_every_n_processed": 0,
@@ -64,7 +64,7 @@
     "job_name": "parse-3",
     "worker_name": "worker-01",
     "worker_index": 1,
-    "worker_count": 12,
+    "worker_count": 10,
     "vimeo_authenticated_session": true,
     "batch_number": 0,
     "batch_count": 0
@@ -93,8 +93,8 @@
     "ffprobe_bin": "ffprobe"
   },
   "workers": {
-    "count": 12,
-    "stagger_start_seconds": 75,
+    "count": 10,
+    "stagger_start_seconds": 45,
     "shared_media_dirs": true,
     "api_pool": []
   },

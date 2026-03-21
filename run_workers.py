@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from download_vimeo_seleniumbase_v3 import PROJECT_ROOT, load_config, setup_logger
+from launcher_support import configure_launched_worker_notifications, get_storage_snapshot
 from result_exports import write_result_url_lists
 from telegram_notifier import TelegramNotifier
 
@@ -76,6 +77,7 @@ def build_worker_config(master_config, worker_dir, shard_path, worker_index, wor
     else:
         worker_config["runtime"]["api_pool_slot"] = None
 
+    configure_launched_worker_notifications(worker_config)
     return worker_name, worker_config
 
 
@@ -131,7 +133,7 @@ def summarize_worker_results(worker_dir, worker_name):
     }
 
 
-def build_coordinator_progress_lines(processes, total_urls):
+def build_coordinator_progress_lines(processes, total_urls, storage_root=None):
     worker_summaries = []
     totals = {
         "processed": 0,
@@ -160,6 +162,10 @@ def build_coordinator_progress_lines(processes, total_urls):
         f"failed: <code>{totals['failed']}</code>",
         f"pending: <code>{totals['pending']}</code>",
     ]
+
+    storage = get_storage_snapshot(storage_root)
+    if storage:
+        lines.append(f"storage_used: <code>{storage['human']}</code>")
 
     for summary in worker_summaries:
         lines.append(
@@ -211,6 +217,7 @@ def main():
         "Shared media dirs: %s",
         bool(workers_cfg.get("shared_media_dirs", False)),
     )
+    storage_root = master_config.get("offload", {}).get("storage_root")
 
     telegram = TelegramNotifier(
         master_config,
@@ -223,6 +230,7 @@ def main():
             f"workers: {worker_count}",
             f"urls: {len(urls)}",
             f"config: <code>{master_config['_meta']['config_path']}</code>",
+            f"storage_root: <code>{storage_root}</code>" if storage_root else "storage_root: <code>-</code>",
         ],
     )
     last_coordinator_progress_ts = 0.0
@@ -309,7 +317,7 @@ def main():
         if progress_every_seconds > 0 and now - last_coordinator_progress_ts >= progress_every_seconds:
             telegram.notify_custom(
                 "Coordinator progress",
-                build_coordinator_progress_lines(processes, len(urls)),
+                build_coordinator_progress_lines(processes, len(urls), storage_root=storage_root),
             )
             last_coordinator_progress_ts = now
 
@@ -341,6 +349,9 @@ def main():
     aggregate["total_processed"] = (
         aggregate["downloaded"] + aggregate["skipped"] + aggregate["failed"]
     )
+    storage = get_storage_snapshot(storage_root)
+    if storage:
+        aggregate["storage"] = storage
 
     aggregate_results_items = []
     for item in processes:
@@ -384,6 +395,8 @@ def main():
             f"skipped: {aggregate['skipped']}",
             f"failed: {aggregate['failed']}",
             f"exit_code: {exit_code}",
+            f"storage_used: <code>{storage['human']}</code>" if storage else "storage_used: <code>missing</code>",
+            f"storage_root: <code>{storage['path']}</code>" if storage else "storage_root: <code>-</code>",
             f"summary: <code>{aggregate_summary_path}</code>",
             f"results: <code>{aggregate_results_manifest_path}</code>",
             f"downloaded_urls: <code>{exported_lists['downloaded_original']}</code>",

@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from download_vimeo_seleniumbase_v3 import PROJECT_ROOT, load_config, setup_logger
+from launcher_support import configure_launched_worker_notifications, get_storage_snapshot
 from result_exports import write_result_url_lists
 from telegram_notifier import TelegramNotifier
 
@@ -331,7 +332,7 @@ def merge_shard_results(global_results, shard_results, batch_number, worker_name
     )
 
 
-def build_assignment_summary(manifest, selected_batches, state, global_results, worker_count):
+def build_assignment_summary(manifest, selected_batches, state, global_results, worker_count, storage_root=None):
     items = state.get("items", {})
     completed_batches = sum(1 for item in items.values() if item.get("status") == "completed")
     running_batches = sum(1 for item in items.values() if item.get("status") == "running")
@@ -341,7 +342,7 @@ def build_assignment_summary(manifest, selected_batches, state, global_results, 
     total_urls = int(global_results.get("total_urls", 0))
     finalized = int(counts.get("finalized", 0))
 
-    return {
+    summary = {
         "server_name": manifest["server_name"],
         "manifest_path": manifest["manifest_path"],
         "updated_at": now_string(),
@@ -359,6 +360,10 @@ def build_assignment_summary(manifest, selected_batches, state, global_results, 
         "remaining_urls": max(0, total_urls - finalized),
         "completed": pending_batches == 0 and running_batches == 0 and failed_batches == 0,
     }
+    storage = get_storage_snapshot(storage_root)
+    if storage:
+        summary["storage"] = storage
+    return summary
 
 
 def build_worker_slot_summary(slot_name, slot_index, batch_number=None):
@@ -482,6 +487,7 @@ def build_batch_worker_config(master_config, batch_dir, source_json_path, batch_
     else:
         batch_config["runtime"]["api_pool_slot"] = None
 
+    configure_launched_worker_notifications(batch_config)
     return worker_name, batch_config
 
 
@@ -534,7 +540,7 @@ def next_pending_batch(state):
     return None
 
 
-def build_progress_lines(state, global_results, active_processes):
+def build_progress_lines(state, global_results, active_processes, storage_root=None):
     snapshot = build_progress_snapshot(global_results, active_processes)
     counts = snapshot["counts"]
     items = state.get("items", {})
@@ -552,6 +558,9 @@ def build_progress_lines(state, global_results, active_processes):
         f"failed_logged: <code>{int(counts.get('failed', 0))}</code>",
         f"batches: <code>completed={completed_batches} running={running_batches} pending={pending_batches} failed={failed_batches}</code>",
     ]
+    storage = get_storage_snapshot(storage_root)
+    if storage:
+        lines.append(f"storage_used: <code>{storage['human']}</code>")
     for worker_name in sorted(active_processes):
         item = active_processes[worker_name]
         live_counts = snapshot["worker_live"].get(worker_name, {})
@@ -617,6 +626,7 @@ def main():
     logger.info("Server name: %s", assignment["server_name"])
     logger.info("Selected shard batches: %d", len(selected_batches))
     logger.info("Worker slots: %d", worker_count)
+    storage_root = master_config.get("offload", {}).get("storage_root")
 
     state_path = workers_root / "assignment_state.json"
     results_path = workers_root / "aggregate_results_manifest.json"
@@ -628,7 +638,14 @@ def main():
 
     global_results = load_assignment_results(results_path, assignment, selected_batches, logger)
     save_assignment_results(results_path, global_results)
-    aggregate_summary = build_assignment_summary(assignment, selected_batches, state, global_results, worker_count)
+    aggregate_summary = build_assignment_summary(
+        assignment,
+        selected_batches,
+        state,
+        global_results,
+        worker_count,
+        storage_root=storage_root,
+    )
     write_json(summary_path, aggregate_summary)
     exported_lists = write_result_url_lists(global_results.get("items", []), workers_root)
 
@@ -644,6 +661,7 @@ def main():
             f"workers: <code>{worker_count}</code>",
             f"selected_batches: <code>{len(selected_batches)}</code>",
             f"manifest: <code>{assignment['manifest_path']}</code>",
+            f"storage_root: <code>{storage_root}</code>" if storage_root else "storage_root: <code>-</code>",
         ],
     )
 
@@ -843,6 +861,7 @@ def main():
                 state,
                 global_results,
                 worker_count,
+                storage_root=storage_root,
             )
             aggregate_summary["url_list_exports"] = exported_lists
             aggregate_summary["exit_code"] = exit_code
@@ -875,7 +894,12 @@ def main():
         if progress_every_seconds > 0 and now - last_progress_ts >= progress_every_seconds:
             telegram.notify_custom(
                 "Coordinator progress",
-                build_progress_lines(state, global_results, active_processes),
+                build_progress_lines(
+                    state,
+                    global_results,
+                    active_processes,
+                    storage_root=storage_root,
+                ),
             )
             last_progress_ts = now
 
@@ -885,6 +909,7 @@ def main():
         state,
         global_results,
         worker_count,
+        storage_root=storage_root,
     )
     exported_lists = write_result_url_lists(global_results.get("items", []), workers_root)
     aggregate_summary["url_list_exports"] = exported_lists
@@ -907,6 +932,16 @@ def main():
             f"downloaded: <code>{aggregate_summary['downloaded']}</code>",
             f"skipped: <code>{aggregate_summary['skipped']}</code>",
             f"failed_logged: <code>{aggregate_summary['failed_logged']}</code>",
+            (
+                f"storage_used: <code>{aggregate_summary['storage']['human']}</code>"
+                if aggregate_summary.get("storage")
+                else "storage_used: <code>missing</code>"
+            ),
+            (
+                f"storage_root: <code>{aggregate_summary['storage']['path']}</code>"
+                if aggregate_summary.get("storage")
+                else "storage_root: <code>-</code>"
+            ),
             f"summary: <code>{summary_path}</code>",
             f"results: <code>{results_path}</code>",
             f"downloaded_urls: <code>{exported_lists['downloaded_original']}</code>",
