@@ -1,0 +1,105 @@
+{
+  "secrets_file": "config.parse-3.secrets.json",
+  "files": {
+    "source_json": "need_parse_unique.json",
+    "videos_dir": "output/runs/parse-3/videos",
+    "jsons_dir": "output/runs/parse-3/jsons",
+    "logs_dir": "output/runs/parse-3",
+    "failed_downloads": "output/runs/parse-3/failed_downloads.json",
+    "log_file": "output/runs/parse-3/download.log",
+    "summary_file": "output/runs/parse-3/summary.json",
+    "results_file": "output/runs/parse-3/results_manifest.json"
+  },
+  "telegram": {
+    "enabled": false,
+    "api_base_url": "https://api.telegram.org",
+    "source_address": "10.8.0.5",
+    "notify_download_every_n_successes": 0,
+    "notify_skip_every_n_processed": 0,
+    "notify_progress_every_n_processed": 0,
+    "notify_progress_min_interval_seconds": 1800,
+    "notify_coordinator_progress_every_seconds": 1800,
+    "request_timeout_seconds": 30,
+    "retry_attempts": 4,
+    "retry_delay_seconds": 3,
+    "force_ipv4": true,
+    "notify_on_start": true,
+    "notify_on_finish": true,
+    "notify_on_error": false,
+    "notify_on_ip_block": true,
+    "notify_on_stall": true,
+    "notify_on_heartbeat": false
+  },
+  "settings": {
+    "test_mode": false,
+    "test_limit": 0,
+    "retry_attempts": 3,
+    "retry_delay": 8,
+    "javascript_wait_time": 15,
+    "download_timeout": 600,
+    "connect_timeout": 45,
+    "download_chunk_size_kb": 1024,
+    "download_progress_log_seconds": 15,
+    "download_only_original": true,
+    "store_full_api_payload_for_downloaded": true,
+    "download_interface": "",
+    "download_retry_interface": "",
+    "api_401_fallback_to_page": true,
+    "direct_download_timeout_seconds": 180,
+    "curl_stall_timeout_seconds": 90,
+    "login_completion_timeout_seconds": 30,
+    "login_retry_attempts": 3,
+    "login_retry_delay_seconds": 20
+  },
+  "browser": {
+    "uc": true,
+    "headless": false,
+    "xvfb": true,
+    "disable_csp": true,
+    "block_images": false,
+    "incognito": false,
+    "chromium_arg": "--disable-blink-features=AutomationControlled"
+  },
+  "runtime": {
+    "job_name": "parse-3",
+    "worker_name": "worker-01",
+    "worker_index": 1,
+    "worker_count": 9,
+    "vimeo_authenticated_session": true,
+    "batch_number": 0,
+    "batch_count": 0
+  },
+  "watchdog": {
+    "enabled": true,
+    "stall_alert_after_seconds": 1800,
+    "repeat_alert_every_seconds": 1800,
+    "heartbeat_every_seconds": 900
+  },
+  "resume": {
+    "enabled": true,
+    "state_file": "output/runs/parse-3/resume_state.json",
+    "skip_completed_files": true,
+    "resume_partial_downloads": true
+  },
+  "offload": {
+    "enabled": true,
+    "storage_root": "/29d_kon/mount/mimas/vimeo/2025scraped/parse-3",
+    "registry_file": "output/runs/parse-3/offload_registry.json",
+    "log_file": "output/runs/parse-3/offload.log",
+    "scan_interval_seconds": 600,
+    "min_file_age_seconds": 30,
+    "delete_local_video_after_upload": true,
+    "validate_with_ffprobe": true,
+    "ffprobe_bin": "ffprobe"
+  },
+  "workers": {
+    "count": 9,
+    "stagger_start_seconds": 60,
+    "shared_media_dirs": true,
+    "api_pool": []
+  },
+  "batches": {
+    "stop_on_batch_error": false,
+    "max_batch_retries": 2
+  }
+}

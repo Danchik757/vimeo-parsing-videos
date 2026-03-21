@@ -89,6 +89,7 @@ def load_config(config_path):
     settings.setdefault("store_full_api_payload_for_downloaded", True)
     settings.setdefault("download_interface", "")
     settings.setdefault("download_retry_interface", "")
+    settings.setdefault("api_401_fallback_to_page", False)
     settings.setdefault(
         "direct_download_timeout_seconds",
         int(settings.get("download_timeout", 600)),
@@ -1338,6 +1339,7 @@ def download_video(
     login_email=None,
     login_password=None,
     cloudflare_retry_count=0,
+    cached_download=None,
 ):
     result = {
         "success": False,
@@ -1371,86 +1373,71 @@ def download_video(
     }
 
     try:
-        api_download = extract_best_api_download(json_data)
-        result["api_best_option"] = normalize_download_option(api_download)
         runtime_state.touch("checking direct api download", video_id)
         download_only_original = bool(config["settings"].get("download_only_original", False))
-        api_selected_quality = None
-        api_is_original = None
-        if api_download:
-            api_selected_quality = (
-                api_download.get("text")
-                or api_download.get("quality")
-                or api_download.get("rendition")
-            )
-            api_is_original = is_original_quality(api_selected_quality, config=config)
+        download_link = None
+        api_non_original_fallback = False
 
-        api_non_original_fallback = bool(
-            api_download and download_only_original and api_is_original is not True
-        )
-        if api_download:
-            result["download_source"] = "api"
-            result["selected_quality"] = api_selected_quality
-            result["is_original"] = api_is_original
-            result["download_link"] = api_download.get("href")
-            result["download_link_found"] = bool(api_download.get("href"))
-            result["downloadable"] = True
-            if api_non_original_fallback:
-                result["policy_reason"] = "downloadable via api but best available option is not original"
-
-        use_api_download = bool(api_download)
-        if download_only_original and not api_is_original:
-            use_api_download = False
-
-        if use_api_download:
-            download_link = api_download["href"]
-            logger.info(
-                "Using direct API download link for %s (%s)",
-                video_id,
-                api_download.get("text")
-                or api_download.get("quality")
-                or "best available",
-            )
+        cached_download_link = str((cached_download or {}).get("download_link") or "").strip()
+        if cached_download_link:
+            result["download_source"] = (cached_download or {}).get("download_source") or "cached"
+            result["selected_quality"] = (cached_download or {}).get("selected_quality")
+            result["is_original"] = (cached_download or {}).get("is_original")
+            result["download_link"] = cached_download_link
+            result["download_link_found"] = True
+            result["downloadable"] = bool((cached_download or {}).get("downloadable", True))
+            result["button_found"] = (cached_download or {}).get("button_found")
+            download_link = cached_download_link
+            logger.info("Reusing cached download link for %s from previous attempt", video_id)
         else:
-            runtime_state.touch("opening video page", video_id)
-            logger.info("Opening %s", video_url)
-            sb.open(video_url)
-            result["page_visited"] = True
-
-            initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
-            logger.info("Waiting %.1fs for page load...", initial_wait)
-            sb.sleep(initial_wait)
-
-            try:
-                result["page_url"] = sb.get_current_url()
-            except Exception:
-                result["page_url"] = video_url
-            try:
-                result["page_title"] = sb.get_title()
-            except Exception:
-                result["page_title"] = None
-            try:
-                result["page_context"] = extract_page_context_summary(sb.get_page_source())
-            except Exception:
-                result["page_context"] = None
-
-            if bool(config["runtime"].get("vimeo_authenticated_session", False)) and is_login_page(
-                result.get("page_url"),
-                result.get("page_title"),
-                result.get("page_context"),
-            ):
-                logger.warning(
-                    "Session appears logged out while opening %s; re-authenticating",
-                    video_url,
+            api_download = extract_best_api_download(json_data)
+            result["api_best_option"] = normalize_download_option(api_download)
+            api_selected_quality = None
+            api_is_original = None
+            if api_download:
+                api_selected_quality = (
+                    api_download.get("text")
+                    or api_download.get("quality")
+                    or api_download.get("rendition")
                 )
-                runtime_state.touch("re-authenticating session", video_id)
-                login_to_vimeo(sb, login_email, login_password, logger, config)
-                result["session_relogin"] = True
+                api_is_original = is_original_quality(api_selected_quality, config=config)
+
+            api_non_original_fallback = bool(
+                api_download and download_only_original and api_is_original is not True
+            )
+            if api_download:
+                result["download_source"] = "api"
+                result["selected_quality"] = api_selected_quality
+                result["is_original"] = api_is_original
+                result["download_link"] = api_download.get("href")
+                result["download_link_found"] = bool(api_download.get("href"))
+                result["downloadable"] = True
+                if api_non_original_fallback:
+                    result["policy_reason"] = "downloadable via api but best available option is not original"
+
+            use_api_download = bool(api_download)
+            if download_only_original and not api_is_original:
+                use_api_download = False
+
+            if use_api_download:
+                download_link = api_download["href"]
+                logger.info(
+                    "Using direct API download link for %s (%s)",
+                    video_id,
+                    api_download.get("text")
+                    or api_download.get("quality")
+                    or "best available",
+                )
+            else:
+                runtime_state.touch("opening video page", video_id)
+                logger.info("Opening %s", video_url)
                 sb.open(video_url)
+                result["page_visited"] = True
 
                 initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
-                logger.info("Waiting %.1fs for page reload after login...", initial_wait)
+                logger.info("Waiting %.1fs for page load...", initial_wait)
                 sb.sleep(initial_wait)
+
                 try:
                     result["page_url"] = sb.get_current_url()
                 except Exception:
@@ -1464,130 +1451,160 @@ def download_video(
                 except Exception:
                     result["page_context"] = None
 
-            if check_if_cloudflare_blocked(sb, logger):
-                result["cloudflare_detected"] = True
-                cloudflare_timeout = random.uniform(
-                    CLOUDFLARE_TIMEOUT_MIN,
-                    CLOUDFLARE_TIMEOUT_MAX,
-                )
-                cloudflare_timeout += cloudflare_retry_count * 10
+                if bool(config["runtime"].get("vimeo_authenticated_session", False)) and is_login_page(
+                    result.get("page_url"),
+                    result.get("page_title"),
+                    result.get("page_context"),
+                ):
+                    logger.warning(
+                        "Session appears logged out while opening %s; re-authenticating",
+                        video_url,
+                    )
+                    runtime_state.touch("re-authenticating session", video_id)
+                    login_to_vimeo(sb, login_email, login_password, logger, config)
+                    result["session_relogin"] = True
+                    sb.open(video_url)
 
-                runtime_state.touch("waiting cloudflare auto-bypass", video_id)
-                logger.warning(
-                    "Cloudflare detected, waiting %.0fs for auto-bypass...",
-                    cloudflare_timeout,
-                )
-                sb.sleep(cloudflare_timeout)
+                    initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
+                    logger.info("Waiting %.1fs for page reload after login...", initial_wait)
+                    sb.sleep(initial_wait)
+                    try:
+                        result["page_url"] = sb.get_current_url()
+                    except Exception:
+                        result["page_url"] = video_url
+                    try:
+                        result["page_title"] = sb.get_title()
+                    except Exception:
+                        result["page_title"] = None
+                    try:
+                        result["page_context"] = extract_page_context_summary(sb.get_page_source())
+                    except Exception:
+                        result["page_context"] = None
 
                 if check_if_cloudflare_blocked(sb, logger):
-                    result["error"] = (
-                        f"Cloudflare Turnstile not bypassed after "
-                        f"{cloudflare_timeout:.0f}s"
+                    result["cloudflare_detected"] = True
+                    cloudflare_timeout = random.uniform(
+                        CLOUDFLARE_TIMEOUT_MIN,
+                        CLOUDFLARE_TIMEOUT_MAX,
                     )
-                    logger.error(result["error"])
+                    cloudflare_timeout += cloudflare_retry_count * 10
+
+                    runtime_state.touch("waiting cloudflare auto-bypass", video_id)
+                    logger.warning(
+                        "Cloudflare detected, waiting %.0fs for auto-bypass...",
+                        cloudflare_timeout,
+                    )
+                    sb.sleep(cloudflare_timeout)
+
+                    if check_if_cloudflare_blocked(sb, logger):
+                        result["error"] = (
+                            f"Cloudflare Turnstile not bypassed after "
+                            f"{cloudflare_timeout:.0f}s"
+                        )
+                        logger.error(result["error"])
+                        try:
+                            page_source = sb.get_page_source()
+                            debug_file = Path(config["files"]["logs_dir"]) / (
+                                f"cloudflare_fail_{video_id}.html"
+                            )
+                            with open(debug_file, "w", encoding="utf-8") as f:
+                                f.write(page_source)
+                            logger.info("Saved failed HTML to %s", debug_file)
+                        except Exception:
+                            pass
+                        return result
+
+                    logger.info("Cloudflare bypassed successfully")
+
+                runtime_state.touch("simulating mouse movement", video_id)
+                simulate_mouse_movement(sb, logger)
+
+                runtime_state.touch("simulating page scroll", video_id)
+                simulate_page_scroll(sb, logger)
+
+                reading_time = random.uniform(READING_TIME_MIN, READING_TIME_MAX)
+                runtime_state.touch("simulating reading", video_id)
+                logger.info("Simulating reading (%.1fs)...", reading_time)
+                sb.sleep(reading_time)
+
+                js_timeout = max(10, int(config["settings"]["javascript_wait_time"]))
+                runtime_state.touch("clicking download button", video_id)
+                try:
+                    click_download_button(sb, timeout=js_timeout, logger=logger)
+                    result["button_found"] = True
+                except Exception as exc:
+                    result["button_found"] = False
+                    result["probe_error"] = "Download button not found"
+                    if api_non_original_fallback:
+                        result["skipped_by_policy"] = True
+                        result["policy_reason"] = (
+                            "downloadable via api but not original; page probe failed: "
+                            "Download button not found"
+                        )
+                        logger.info(
+                            "Page probe for %s did not find button, but API already confirmed non-original downloadability (link=%s)",
+                            video_id,
+                            result.get("download_link"),
+                        )
+                        return result
+                    result["error"] = "Download button not found"
+                    logger.error("Download button not found for %s: %s", video_id, exc)
                     try:
                         page_source = sb.get_page_source()
                         debug_file = Path(config["files"]["logs_dir"]) / (
-                            f"cloudflare_fail_{video_id}.html"
+                            f"no_button_{video_id}.html"
                         )
                         with open(debug_file, "w", encoding="utf-8") as f:
                             f.write(page_source)
-                        logger.info("Saved failed HTML to %s", debug_file)
+                        logger.info("Saved HTML (no button) to %s", debug_file)
                     except Exception:
                         pass
                     return result
 
-                logger.info("Cloudflare bypassed successfully")
-
-            runtime_state.touch("simulating mouse movement", video_id)
-            simulate_mouse_movement(sb, logger)
-
-            runtime_state.touch("simulating page scroll", video_id)
-            simulate_page_scroll(sb, logger)
-
-            reading_time = random.uniform(READING_TIME_MIN, READING_TIME_MAX)
-            runtime_state.touch("simulating reading", video_id)
-            logger.info("Simulating reading (%.1fs)...", reading_time)
-            sb.sleep(reading_time)
-
-            js_timeout = max(10, int(config["settings"]["javascript_wait_time"]))
-            runtime_state.touch("clicking download button", video_id)
-            try:
-                click_download_button(sb, timeout=js_timeout, logger=logger)
-                result["button_found"] = True
-            except Exception as exc:
-                result["button_found"] = False
-                result["probe_error"] = "Download button not found"
-                if api_non_original_fallback:
-                    result["skipped_by_policy"] = True
-                    result["policy_reason"] = (
-                        "downloadable via api but not original; page probe failed: "
-                        "Download button not found"
-                    )
-                    logger.info(
-                        "Page probe for %s did not find button, but API already confirmed non-original downloadability (link=%s)",
-                        video_id,
-                        result.get("download_link"),
-                    )
-                    return result
-                result["error"] = "Download button not found"
-                logger.error("Download button not found for %s: %s", video_id, exc)
-                try:
-                    page_source = sb.get_page_source()
-                    debug_file = Path(config["files"]["logs_dir"]) / (
-                        f"no_button_{video_id}.html"
-                    )
-                    with open(debug_file, "w", encoding="utf-8") as f:
-                        f.write(page_source)
-                    logger.info("Saved HTML (no button) to %s", debug_file)
-                except Exception:
-                    pass
-                return result
-
-            runtime_state.touch("extracting modal download option", video_id)
-            options = collect_modal_download_options(sb, timeout=js_timeout)
-            result["available_options"] = normalize_download_options(options)
-            result["available_options_count"] = len(result["available_options"])
-            best_option = choose_best_download_option(options)
-            result["page_best_option"] = normalize_download_option(best_option)
-            result["has_original_option"] = any(
-                is_original_quality(option.get("text"), config=config)
-                for option in result["available_options"]
-            )
-
-            if not best_option:
-                result["probe_error"] = (
-                    "No download option found in modal"
-                    if result["available_options_count"] > 0
-                    else "Download modal not found"
+                runtime_state.touch("extracting modal download option", video_id)
+                options = collect_modal_download_options(sb, timeout=js_timeout)
+                result["available_options"] = normalize_download_options(options)
+                result["available_options_count"] = len(result["available_options"])
+                best_option = choose_best_download_option(options)
+                result["page_best_option"] = normalize_download_option(best_option)
+                result["has_original_option"] = any(
+                    is_original_quality(option.get("text"), config=config)
+                    for option in result["available_options"]
                 )
-                if api_non_original_fallback:
-                    result["skipped_by_policy"] = True
-                    result["policy_reason"] = (
-                        "downloadable via api but not original; page probe did not expose original "
-                        f"({result['probe_error']})"
-                    )
-                    logger.info(
-                        "Page probe for %s did not expose original; keeping API non-original metadata only (link=%s)",
-                        video_id,
-                        result.get("download_link"),
-                    )
-                    return result
-                result["error"] = result["probe_error"]
-                logger.error(result["error"])
-                return result
 
-            download_link = best_option["href"]
-            result["download_source"] = "page"
-            result["selected_quality"] = best_option.get("text")
-            result["is_original"] = is_original_quality(
-                result["selected_quality"],
-                config=config,
-            )
-            result["download_link"] = download_link
-            result["download_link_found"] = True
-            result["downloadable"] = True
-            logger.info("Got download link")
+                if not best_option:
+                    result["probe_error"] = (
+                        "No download option found in modal"
+                        if result["available_options_count"] > 0
+                        else "Download modal not found"
+                    )
+                    if api_non_original_fallback:
+                        result["skipped_by_policy"] = True
+                        result["policy_reason"] = (
+                            "downloadable via api but not original; page probe did not expose original "
+                            f"({result['probe_error']})"
+                        )
+                        logger.info(
+                            "Page probe for %s did not expose original; keeping API non-original metadata only (link=%s)",
+                            video_id,
+                            result.get("download_link"),
+                        )
+                        return result
+                    result["error"] = result["probe_error"]
+                    logger.error(result["error"])
+                    return result
+
+                download_link = best_option["href"]
+                result["download_source"] = "page"
+                result["selected_quality"] = best_option.get("text")
+                result["is_original"] = is_original_quality(
+                    result["selected_quality"],
+                    config=config,
+                )
+                result["download_link"] = download_link
+                result["download_link_found"] = True
+                result["downloadable"] = True
+                logger.info("Got download link")
 
         if download_only_original and result["is_original"] is not True:
             result["skipped_by_policy"] = True
@@ -2237,31 +2254,39 @@ def main():
                         result = create_placeholder_result()
 
                         if response.status_code == 401:
-                            fatal_error = "API Authentication error (401) - invalid token"
-                            logger.error(fatal_error)
-                            metadata_path = save_video_metadata(
-                                config,
-                                video_dir,
-                                video_id,
-                                video_url,
-                                None,
-                                api_probe,
-                                result,
-                                "failed",
-                                "fatal_api_401 invalid token",
-                            )
-                            update_results_manifest(
-                                results_manifest,
-                                i,
-                                status="failed",
-                                reason="fatal_api_401 invalid token",
-                                metadata_json=str(metadata_path),
-                                storage_bucket=get_metadata_bucket("failed", result=result),
-                            )
-                            save_results_manifest(config, results_manifest)
-                            telegram.notify_api_error(401, "Invalid API token")
-                            exit_code = 2
-                            break
+                            if bool(config["settings"].get("api_401_fallback_to_page", False)):
+                                logger.warning(
+                                    "API Authentication error (401) for %s. "
+                                    "Falling back to page flow because settings.api_401_fallback_to_page=true",
+                                    video_id,
+                                )
+                                api_payload = {}
+                            else:
+                                fatal_error = "API Authentication error (401) - invalid token"
+                                logger.error(fatal_error)
+                                metadata_path = save_video_metadata(
+                                    config,
+                                    video_dir,
+                                    video_id,
+                                    video_url,
+                                    None,
+                                    api_probe,
+                                    result,
+                                    "failed",
+                                    "fatal_api_401 invalid token",
+                                )
+                                update_results_manifest(
+                                    results_manifest,
+                                    i,
+                                    status="failed",
+                                    reason="fatal_api_401 invalid token",
+                                    metadata_json=str(metadata_path),
+                                    storage_bucket=get_metadata_bucket("failed", result=result),
+                                )
+                                save_results_manifest(config, results_manifest)
+                                telegram.notify_api_error(401, "Invalid API token")
+                                exit_code = 2
+                                break
 
                         if response.status_code == 429:
                             fatal_error = "API rate limit exceeded (429)"
@@ -2518,6 +2543,7 @@ def main():
                         retry_attempts = int(config["settings"]["retry_attempts"])
                         retry_delay = int(config["settings"]["retry_delay"])
                         result = None
+                        cached_download = None
                         for attempt in range(1, retry_attempts + 1):
                             runtime_state.touch(f"download attempt {attempt}", video_id)
                             result = download_video(
@@ -2532,11 +2558,21 @@ def main():
                                 login_email=login_email,
                                 login_password=login_password,
                                 cloudflare_retry_count=attempt - 1,
+                                cached_download=cached_download,
                             )
                             if result["success"]:
                                 break
                             if result.get("skipped_by_policy"):
                                 break
+                            if result.get("download_link"):
+                                cached_download = {
+                                    "download_link": result.get("download_link"),
+                                    "download_source": result.get("download_source"),
+                                    "selected_quality": result.get("selected_quality"),
+                                    "is_original": result.get("is_original"),
+                                    "downloadable": result.get("downloadable"),
+                                    "button_found": result.get("button_found"),
+                                }
                             if attempt < retry_attempts:
                                 logger.warning(
                                     "Attempt %d/%d failed for %s: %s. Retrying in %ss",

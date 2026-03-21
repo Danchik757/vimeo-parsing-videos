@@ -41,6 +41,7 @@ __pycache__/
 config.json
 config.local.json
 config.*.local.json
+config.*.secrets.json
 test_configs/*.local.json
 
 # Selenium
