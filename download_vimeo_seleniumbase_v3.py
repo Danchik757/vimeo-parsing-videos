@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlparse
 
