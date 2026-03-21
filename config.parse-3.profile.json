@@ -64,7 +64,7 @@
     "job_name": "parse-3",
     "worker_name": "worker-01",
     "worker_index": 1,
-    "worker_count": 9,
+    "worker_count": 12,
     "vimeo_authenticated_session": true,
     "batch_number": 0,
     "batch_count": 0
@@ -93,8 +93,8 @@
     "ffprobe_bin": "ffprobe"
   },
   "workers": {
-    "count": 9,
-    "stagger_start_seconds": 60,
+    "count": 12,
+    "stagger_start_seconds": 75,
     "shared_media_dirs": true,
     "api_pool": []
   },

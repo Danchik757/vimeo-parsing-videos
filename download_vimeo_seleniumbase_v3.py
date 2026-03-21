@@ -430,17 +430,50 @@ def save_login_failure_artifact(sb, logger, config, attempt):
         logger.warning("Failed to save login failure HTML: %s", exc)
 
 
+def wait_for_first_visible_selector(sb, selectors, timeout_seconds):
+    deadline = time.time() + max(1, int(timeout_seconds))
+    while time.time() < deadline:
+        for selector in selectors:
+            try:
+                sb.wait_for_element_visible(selector, timeout=1)
+                return selector
+            except Exception:
+                continue
+    return None
+
+
+def click_first_matching_selector(sb, selectors, logger, timeout=3):
+    for selector in selectors:
+        try:
+            sb.wait_for_element_present(selector, timeout=timeout)
+            sb.click(selector)
+            logger.info("Clicked login helper control via %s", selector)
+            return selector
+        except Exception:
+            continue
+    return None
+
+
 def login_to_vimeo(sb, email, password, logger, config):
     settings = config["settings"]
     login_completion_timeout = int(settings.get("login_completion_timeout_seconds", 30))
     login_retry_attempts = int(settings.get("login_retry_attempts", 3))
     login_retry_delay_seconds = int(settings.get("login_retry_delay_seconds", 10))
+    login_page_wait_seconds = max(12, int(settings.get("javascript_wait_time", 15)))
 
+    login_urls = [
+        "https://vimeo.com/log_in",
+        "https://vimeo.com/login",
+    ]
     email_selectors = [
         "#email_login",
         "input[data-testid='site_login_email_input']",
         "input[name='email']",
         "input[type='email']",
+        "input[autocomplete='username']",
+        "input[autocomplete='email']",
+        "input[id*='email']",
+        "input[placeholder*='email' i]",
         "#email",
     ]
     password_selectors = [
@@ -448,39 +481,82 @@ def login_to_vimeo(sb, email, password, logger, config):
         "input[data-testid='site_login_password_input']",
         "input[name='password']",
         "input[type='password']",
+        "input[autocomplete='current-password']",
+        "input[id*='password']",
+        "input[placeholder*='password' i]",
         "#password",
     ]
     submit_selectors = [
         "button[data-testid='site_login_submit_button']",
         "button[type='submit']",
         "button[aria-label*='Log in']",
+        "//button[contains(translate(., 'LOGIN', 'login'), 'log in')]",
+        "//button[contains(translate(., 'LOGIN', 'login'), 'login')]",
+    ]
+    continue_with_email_selectors = [
+        "button[data-testid='email-login-button']",
+        "//button[contains(translate(., 'EMAIL', 'email'), 'email')]",
+        "//a[contains(translate(., 'EMAIL', 'email'), 'email')]",
     ]
 
     for attempt in range(1, login_retry_attempts + 1):
         logger.info("Opening Vimeo login page (attempt %d/%d)", attempt, login_retry_attempts)
-        sb.open("https://vimeo.com/log_in")
-        sb.sleep(3)
+        email_selector = None
+        for login_url in login_urls:
+            sb.open(login_url)
+            sb.sleep(3)
 
-        for selector in email_selectors:
-            try:
-                sb.wait_for_element_visible(selector, timeout=10)
-                sb.clear(selector)
-                sb.type(selector, email)
-                break
-            except Exception:
-                continue
-        else:
-            raise RuntimeError("Email input not found on Vimeo login page")
+            if check_if_cloudflare_blocked(sb, logger):
+                logger.warning(
+                    "Cloudflare or interstitial detected on login page, waiting %ss before probing fields",
+                    login_page_wait_seconds,
+                )
+                sb.sleep(login_page_wait_seconds)
 
-        for selector in password_selectors:
-            try:
-                sb.clear(selector)
-                sb.type(selector, password)
+            click_first_matching_selector(
+                sb,
+                continue_with_email_selectors,
+                logger,
+                timeout=2,
+            )
+            email_selector = wait_for_first_visible_selector(
+                sb,
+                email_selectors,
+                timeout_seconds=login_page_wait_seconds,
+            )
+            if email_selector:
                 break
+
+        if not email_selector:
+            current_url = ""
+            page_title = ""
+            try:
+                current_url = sb.get_current_url()
             except Exception:
-                continue
-        else:
+                pass
+            try:
+                page_title = sb.get_title()
+            except Exception:
+                pass
+            save_login_failure_artifact(sb, logger, config, attempt)
+            raise RuntimeError(
+                f"Email input not found on Vimeo login page (url={current_url or 'unknown'}, title={page_title or 'unknown'})"
+            )
+
+        sb.clear(email_selector)
+        sb.type(email_selector, email)
+
+        password_selector = wait_for_first_visible_selector(
+            sb,
+            password_selectors,
+            timeout_seconds=10,
+        )
+        if not password_selector:
+            save_login_failure_artifact(sb, logger, config, attempt)
             raise RuntimeError("Password input not found on Vimeo login page")
+
+        sb.clear(password_selector)
+        sb.type(password_selector, password)
 
         for selector in submit_selectors:
             try:
@@ -489,6 +565,7 @@ def login_to_vimeo(sb, email, password, logger, config):
             except Exception:
                 continue
         else:
+            save_login_failure_artifact(sb, logger, config, attempt)
             raise RuntimeError("Login submit button not found on Vimeo login page")
 
         logger.info(
@@ -1592,6 +1669,16 @@ def download_video(
                         return result
                     result["error"] = result["probe_error"]
                     logger.error(result["error"])
+                    try:
+                        page_source = sb.get_page_source()
+                        debug_file = Path(config["files"]["logs_dir"]) / (
+                            f"no_modal_{video_id}.html"
+                        )
+                        with open(debug_file, "w", encoding="utf-8") as f:
+                            f.write(page_source)
+                        logger.info("Saved HTML (no modal) to %s", debug_file)
+                    except Exception:
+                        pass
                     return result
 
                 download_link = best_option["href"]

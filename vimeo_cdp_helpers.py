@@ -1,5 +1,6 @@
 """Helpers for Vimeo download flows in SeleniumBase UC/CDP mode."""
 
+import html
 import re
 import time
 from contextlib import suppress
@@ -9,6 +10,9 @@ DOWNLOAD_BUTTON_SELECTORS = [
     "button[aria-label='Download button']",
     ".chakra-stack.css-tistzx button[aria-label*='Download']",
     ".chakra-stack button[aria-label*='Download']",
+    "a[aria-label*='Download']",
+    "[data-testid*='download']",
+    "[role='button'][aria-label*='Download']",
     "button[aria-label*='Download']",
     "button[title*='Download']",
 ]
@@ -32,8 +36,11 @@ def _matches_download_href(href):
         and (
             "progressive_redirect/download" in href
             or "/download/" in href
+            or "source=1" in href
+            or "filename=" in href
             or ".mp4" in href.lower()
             or ".mov" in href.lower()
+            or ".m4v" in href.lower()
         )
     )
 
@@ -43,6 +50,29 @@ def _extract_element_text(element):
     with suppress(Exception):
         text = element.text
     return _normalize_text(text)
+
+
+def _extract_download_links_from_html(page_html):
+    html_text = html.unescape(str(page_html or ""))
+    pattern = re.compile(
+        r"https://[^\"'\\s<>]+(?:progressive_redirect/download[^\"'\\s<>]*|/download/[^\"'\\s<>]*|[^\"'\\s<>]*[?&]source=1[^\"'\\s<>]*)",
+        re.IGNORECASE,
+    )
+    results = []
+    seen = set()
+    for href in pattern.findall(html_text):
+        href = href.replace("&amp;", "&")
+        if href in seen or not _matches_download_href(href):
+            continue
+        seen.add(href)
+        results.append(
+            {
+                "id": "html-fallback",
+                "text": "html fallback",
+                "href": href,
+            }
+        )
+    return results
 
 
 def _extract_download_options_from_scope(scope_element):
@@ -195,7 +225,7 @@ def click_download_button(sb, timeout=10, logger=None):
 
     if hasattr(sb, "cdp"):
         try:
-            buttons = sb.cdp.select_all("button", timeout=1)
+            buttons = sb.cdp.select_all("button, a, [role='button']", timeout=1)
         except Exception:
             buttons = []
         for button in buttons:
@@ -211,14 +241,18 @@ def click_download_button(sb, timeout=10, logger=None):
                 continue
             with suppress(Exception):
                 button.scroll_into_view()
-            button.click()
+            try:
+                button.click()
+            except Exception:
+                with suppress(Exception):
+                    sb.execute_script("arguments[0].click();", button)
             if logger:
                 logger.info(
-                    "Found and clicked download button via generic CDP button scan"
+                    "Found and clicked download button via generic CDP element scan"
                 )
             return {
                 "method": "cdp",
-                "selector": "button[text*=download]",
+                "selector": "element[text*=download]",
                 "aria_label": aria_label,
             }
 
@@ -259,6 +293,19 @@ def extract_best_modal_download(sb, timeout=10, logger=None):
                         best_option.get("text") or best_option.get("href"),
                     )
                 return best_option
+
+        with suppress(Exception):
+            html_options = _extract_download_links_from_html(sb.get_page_source())
+            if html_options:
+                last_options = html_options
+                best_option = choose_best_download_option(last_options)
+                if best_option:
+                    if logger:
+                        logger.info(
+                            "Selected download option from html fallback: %s",
+                            best_option.get("text") or best_option.get("href"),
+                        )
+                    return best_option
         _sleep(sb, 0.5)
 
     if modal_seen:
