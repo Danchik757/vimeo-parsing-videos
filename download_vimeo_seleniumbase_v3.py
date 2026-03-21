@@ -26,7 +26,10 @@ from vimeo_cdp_helpers import (
     _extract_download_options_from_scope,
     choose_best_download_option,
     click_download_button,
+    click_download_button_in_player_iframe,
     extract_best_api_download,
+    extract_best_player_iframe_download,
+    modal_looks_like_transcript,
 )
 
 
@@ -1404,6 +1407,19 @@ def save_video_metadata(
     return metadata_path
 
 
+def probe_player_iframe_download(sb, video_id, logger, timeout):
+    click_download_button_in_player_iframe(sb, timeout=timeout, logger=logger)
+    best_option = extract_best_player_iframe_download(
+        sb, timeout=timeout, logger=logger
+    )
+    if logger and best_option:
+        logger.info(
+            "Recovered download link for %s from Vimeo player iframe fallback",
+            video_id,
+        )
+    return best_option
+
+
 def download_video(
     sb,
     video_url,
@@ -1610,88 +1626,172 @@ def download_video(
                     click_download_button(sb, timeout=js_timeout, logger=logger)
                     result["button_found"] = True
                 except Exception as exc:
-                    result["button_found"] = False
-                    result["probe_error"] = "Download button not found"
-                    if api_non_original_fallback:
-                        result["skipped_by_policy"] = True
-                        result["policy_reason"] = (
-                            "downloadable via api but not original; page probe failed: "
-                            "Download button not found"
-                        )
-                        logger.info(
-                            "Page probe for %s did not find button, but API already confirmed non-original downloadability (link=%s)",
-                            video_id,
-                            result.get("download_link"),
-                        )
-                        return result
-                    result["error"] = "Download button not found"
-                    logger.error("Download button not found for %s: %s", video_id, exc)
+                    iframe_best_option = None
                     try:
-                        page_source = sb.get_page_source()
-                        debug_file = Path(config["files"]["logs_dir"]) / (
-                            f"no_button_{video_id}.html"
+                        logger.info(
+                            "Trying Vimeo player iframe fallback for %s after page-level button miss",
+                            video_id,
                         )
-                        with open(debug_file, "w", encoding="utf-8") as f:
-                            f.write(page_source)
-                        logger.info("Saved HTML (no button) to %s", debug_file)
-                    except Exception:
-                        pass
-                    return result
+                        iframe_best_option = probe_player_iframe_download(
+                            sb, video_id, logger, js_timeout
+                        )
+                    except Exception as iframe_exc:
+                        logger.info(
+                            "Player iframe fallback did not recover %s: %s",
+                            video_id,
+                            iframe_exc,
+                        )
 
-                runtime_state.touch("extracting modal download option", video_id)
-                options = collect_modal_download_options(sb, timeout=js_timeout)
-                result["available_options"] = normalize_download_options(options)
-                result["available_options_count"] = len(result["available_options"])
-                best_option = choose_best_download_option(options)
-                result["page_best_option"] = normalize_download_option(best_option)
-                result["has_original_option"] = any(
-                    is_original_quality(option.get("text"), config=config)
-                    for option in result["available_options"]
-                )
+                    if iframe_best_option:
+                        result["button_found"] = True
+                        result["available_options"] = normalize_download_options(
+                            [iframe_best_option]
+                        )
+                        result["available_options_count"] = len(
+                            result["available_options"]
+                        )
+                        result["page_best_option"] = normalize_download_option(
+                            iframe_best_option
+                        )
+                        result["has_original_option"] = is_original_quality(
+                            iframe_best_option.get("text"), config=config
+                        )
+                        download_link = iframe_best_option["href"]
+                        result["download_source"] = "page"
+                        result["selected_quality"] = iframe_best_option.get("text")
+                        result["is_original"] = is_original_quality(
+                            result["selected_quality"],
+                            config=config,
+                        )
+                        result["download_link"] = download_link
+                        result["download_link_found"] = True
+                        result["downloadable"] = True
+                        logger.info("Got download link from player iframe fallback")
+                    else:
+                        result["button_found"] = False
+                        result["probe_error"] = "Download button not found"
+                        if api_non_original_fallback:
+                            result["skipped_by_policy"] = True
+                            result["policy_reason"] = (
+                                "downloadable via api but not original; page probe failed: "
+                                "Download button not found"
+                            )
+                            logger.info(
+                                "Page probe for %s did not find button, but API already confirmed non-original downloadability (link=%s)",
+                                video_id,
+                                result.get("download_link"),
+                            )
+                            return result
+                        result["error"] = "Download button not found"
+                        logger.error("Download button not found for %s: %s", video_id, exc)
+                        try:
+                            page_source = sb.get_page_source()
+                            debug_file = Path(config["files"]["logs_dir"]) / (
+                                f"no_button_{video_id}.html"
+                            )
+                            with open(debug_file, "w", encoding="utf-8") as f:
+                                f.write(page_source)
+                            logger.info("Saved HTML (no button) to %s", debug_file)
+                        except Exception:
+                            pass
+                        return result
 
-                if not best_option:
-                    result["probe_error"] = (
-                        "No download option found in modal"
-                        if result["available_options_count"] > 0
-                        else "Download modal not found"
+                if not result.get("download_link_found"):
+                    runtime_state.touch("extracting modal download option", video_id)
+                    options = collect_modal_download_options(sb, timeout=js_timeout)
+                    result["available_options"] = normalize_download_options(options)
+                    result["available_options_count"] = len(result["available_options"])
+                    best_option = choose_best_download_option(options)
+                    result["page_best_option"] = normalize_download_option(best_option)
+                    result["has_original_option"] = any(
+                        is_original_quality(option.get("text"), config=config)
+                        for option in result["available_options"]
                     )
-                    if api_non_original_fallback:
-                        result["skipped_by_policy"] = True
-                        result["policy_reason"] = (
-                            "downloadable via api but not original; page probe did not expose original "
-                            f"({result['probe_error']})"
-                        )
-                        logger.info(
-                            "Page probe for %s did not expose original; keeping API non-original metadata only (link=%s)",
-                            video_id,
-                            result.get("download_link"),
-                        )
-                        return result
-                    result["error"] = result["probe_error"]
-                    logger.error(result["error"])
-                    try:
-                        page_source = sb.get_page_source()
-                        debug_file = Path(config["files"]["logs_dir"]) / (
-                            f"no_modal_{video_id}.html"
-                        )
-                        with open(debug_file, "w", encoding="utf-8") as f:
-                            f.write(page_source)
-                        logger.info("Saved HTML (no modal) to %s", debug_file)
-                    except Exception:
-                        pass
-                    return result
 
-                download_link = best_option["href"]
-                result["download_source"] = "page"
-                result["selected_quality"] = best_option.get("text")
-                result["is_original"] = is_original_quality(
-                    result["selected_quality"],
-                    config=config,
-                )
-                result["download_link"] = download_link
-                result["download_link_found"] = True
-                result["downloadable"] = True
-                logger.info("Got download link")
+                    if not best_option:
+                        transcript_modal = False
+                        with suppress(Exception):
+                            transcript_modal = modal_looks_like_transcript(
+                                sb.get_page_source()
+                            )
+
+                        iframe_best_option = None
+                        try:
+                            logger.info(
+                                "Trying Vimeo player iframe fallback for %s after page-level modal miss",
+                                video_id,
+                            )
+                            iframe_best_option = probe_player_iframe_download(
+                                sb, video_id, logger, js_timeout
+                            )
+                        except Exception as iframe_exc:
+                            logger.info(
+                                "Player iframe fallback did not recover %s: %s",
+                                video_id,
+                                iframe_exc,
+                            )
+
+                        if iframe_best_option:
+                            best_option = iframe_best_option
+                            result["available_options"] = normalize_download_options(
+                                [iframe_best_option]
+                            )
+                            result["available_options_count"] = len(
+                                result["available_options"]
+                            )
+                            result["page_best_option"] = normalize_download_option(
+                                iframe_best_option
+                            )
+                            result["has_original_option"] = is_original_quality(
+                                iframe_best_option.get("text"), config=config
+                            )
+                        else:
+                            result["probe_error"] = (
+                                "Transcript download modal opened instead of video download"
+                                if transcript_modal
+                                else (
+                                    "No download option found in modal"
+                                    if result["available_options_count"] > 0
+                                    else "Download modal not found"
+                                )
+                            )
+                            if api_non_original_fallback:
+                                result["skipped_by_policy"] = True
+                                result["policy_reason"] = (
+                                    "downloadable via api but not original; page probe did not expose original "
+                                    f"({result['probe_error']})"
+                                )
+                                logger.info(
+                                    "Page probe for %s did not expose original; keeping API non-original metadata only (link=%s)",
+                                    video_id,
+                                    result.get("download_link"),
+                                )
+                                return result
+                            result["error"] = result["probe_error"]
+                            logger.error(result["error"])
+                            try:
+                                page_source = sb.get_page_source()
+                                debug_file = Path(config["files"]["logs_dir"]) / (
+                                    f"no_modal_{video_id}.html"
+                                )
+                                with open(debug_file, "w", encoding="utf-8") as f:
+                                    f.write(page_source)
+                                logger.info("Saved HTML (no modal) to %s", debug_file)
+                            except Exception:
+                                pass
+                            return result
+
+                    download_link = best_option["href"]
+                    result["download_source"] = "page"
+                    result["selected_quality"] = best_option.get("text")
+                    result["is_original"] = is_original_quality(
+                        result["selected_quality"],
+                        config=config,
+                    )
+                    result["download_link"] = download_link
+                    result["download_link_found"] = True
+                    result["downloadable"] = True
+                    logger.info("Got download link")
 
         if download_only_original and result["is_original"] is not True:
             result["skipped_by_policy"] = True

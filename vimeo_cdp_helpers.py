@@ -5,6 +5,8 @@ import re
 import time
 from contextlib import suppress
 
+from selenium.webdriver.common.by import By
+
 
 DOWNLOAD_BUTTON_SELECTORS = [
     "button[aria-label='Download button']",
@@ -75,6 +77,11 @@ def _extract_download_links_from_html(page_html):
     return results
 
 
+def modal_looks_like_transcript(page_html):
+    html_text = html.unescape(str(page_html or "")).lower()
+    return "download transcript" in html_text or "captions.vtt" in html_text
+
+
 def _extract_download_options_from_scope(scope_element):
     options = []
 
@@ -123,6 +130,111 @@ def _extract_download_options_from_scope(scope_element):
         )
 
     return options
+
+
+def _iter_player_iframe_elements(sb):
+    driver = getattr(sb, "driver", None)
+    if driver is None:
+        return []
+
+    with suppress(Exception):
+        driver.switch_to.default_content()
+
+    with suppress(Exception):
+        return driver.find_elements(By.CSS_SELECTOR, "iframe[src*='player.vimeo.com/video/']")
+    return []
+
+
+def _click_download_button_in_current_frame(driver, logger=None):
+    last_error = None
+
+    for selector in DOWNLOAD_BUTTON_SELECTORS:
+        try:
+            buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        for button in buttons:
+            try:
+                if not button.is_displayed():
+                    continue
+            except Exception:
+                pass
+
+            aria_label = ""
+            with suppress(Exception):
+                aria_label = button.get_attribute("aria-label") or ""
+
+            try:
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center'});", button
+                )
+            except Exception:
+                pass
+
+            try:
+                button.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", button)
+
+            if logger:
+                logger.info(
+                    "Found and clicked download button inside player iframe via %s (aria-label='%s')",
+                    selector,
+                    aria_label or "(no aria-label)",
+                )
+            return {
+                "method": "iframe",
+                "selector": selector,
+                "aria_label": aria_label,
+            }
+
+    try:
+        candidates = driver.find_elements(By.CSS_SELECTOR, "button, a, [role='button']")
+    except Exception as exc:
+        last_error = exc
+        candidates = []
+
+    for button in candidates:
+        aria_label = ""
+        title = ""
+        text = ""
+        with suppress(Exception):
+            aria_label = button.get_attribute("aria-label") or ""
+        with suppress(Exception):
+            title = button.get_attribute("title") or ""
+        with suppress(Exception):
+            text = button.text or ""
+        haystack = _normalize_text(" ".join([aria_label, title, text])).lower()
+        if "download" not in haystack:
+            continue
+        try:
+            if not button.is_displayed():
+                continue
+        except Exception:
+            pass
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", button
+            )
+        except Exception:
+            pass
+        try:
+            button.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", button)
+        if logger:
+            logger.info(
+                "Found and clicked download button inside player iframe via generic scan"
+            )
+        return {
+            "method": "iframe",
+            "selector": "iframe-element[text*=download]",
+            "aria_label": aria_label,
+        }
+
+    raise RuntimeError(f"Download button not found inside player iframe: {last_error}")
 
 
 def _score_download_option(option):
@@ -262,6 +374,31 @@ def click_download_button(sb, timeout=10, logger=None):
     )
 
 
+def click_download_button_in_player_iframe(sb, timeout=10, logger=None):
+    deadline = time.time() + timeout
+    last_error = None
+
+    while time.time() < deadline:
+        for iframe in _iter_player_iframe_elements(sb):
+            driver = getattr(sb, "driver", None)
+            if driver is None:
+                continue
+            try:
+                driver.switch_to.default_content()
+                driver.switch_to.frame(iframe)
+                return _click_download_button_in_current_frame(driver, logger=logger)
+            except Exception as exc:
+                last_error = exc
+            finally:
+                with suppress(Exception):
+                    driver.switch_to.default_content()
+        _sleep(sb, 0.5)
+
+    raise RuntimeError(
+        "Download button not found inside Vimeo player iframe: %s" % last_error
+    )
+
+
 def extract_best_modal_download(sb, timeout=10, logger=None):
     deadline = time.time() + timeout
     modal_seen = False
@@ -313,3 +450,48 @@ def extract_best_modal_download(sb, timeout=10, logger=None):
     if last_options:
         raise RuntimeError("No usable download links found after clicking Download")
     raise RuntimeError("Download modal not found")
+
+
+def extract_best_player_iframe_download(sb, timeout=10, logger=None):
+    deadline = time.time() + timeout
+    last_options = []
+    transcript_seen = False
+
+    while time.time() < deadline:
+        for iframe in _iter_player_iframe_elements(sb):
+            driver = getattr(sb, "driver", None)
+            if driver is None:
+                continue
+            try:
+                driver.switch_to.default_content()
+                driver.switch_to.frame(iframe)
+                frame_html = driver.page_source
+            except Exception:
+                with suppress(Exception):
+                    driver.switch_to.default_content()
+                continue
+            finally:
+                with suppress(Exception):
+                    driver.switch_to.default_content()
+
+            if modal_looks_like_transcript(frame_html):
+                transcript_seen = True
+
+            html_options = _extract_download_links_from_html(frame_html)
+            if html_options:
+                last_options = html_options
+                best_option = choose_best_download_option(last_options)
+                if best_option:
+                    if logger:
+                        logger.info(
+                            "Selected download option from player iframe html fallback: %s",
+                            best_option.get("text") or best_option.get("href"),
+                        )
+                    return best_option
+        _sleep(sb, 0.5)
+
+    if transcript_seen:
+        raise RuntimeError("Player iframe exposed transcript download only")
+    if last_options:
+        raise RuntimeError("No usable download links found in player iframe")
+    raise RuntimeError("Download controls not found in player iframe")
