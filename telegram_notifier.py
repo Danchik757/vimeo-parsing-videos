@@ -15,6 +15,8 @@ import requests
 from requests.adapters import HTTPAdapter
 import urllib3.util.connection
 
+from config_utils import load_json_config_with_optional_secrets
+
 
 logger = logging.getLogger(__name__)
 _FORCED_IPV4 = False
@@ -559,8 +561,7 @@ def main():
     parser.add_argument("--job-name", default="", help="Job label for test message")
     args = parser.parse_args()
 
-    with open(args.config, "r", encoding="utf-8") as f:
-        config = json.load(f)
+    config, _, _, _ = load_json_config_with_optional_secrets(args.config)
 
     success = test_telegram_connection(
         config,
