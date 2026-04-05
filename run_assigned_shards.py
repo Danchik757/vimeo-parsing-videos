@@ -85,6 +85,69 @@ def load_offload_storage_usage(config, logger=None):
     return {"uploaded_count": uploaded_count, "total_bytes": total_bytes}
 
 
+def read_sockstat_file(path):
+    path = Path(path)
+    if not path.exists():
+        return {}
+
+    stats = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or ":" not in line:
+                    continue
+                family, tail = line.split(":", 1)
+                parts = tail.strip().split()
+                metrics = {}
+                for index in range(0, len(parts) - 1, 2):
+                    key = parts[index]
+                    value = parts[index + 1]
+                    try:
+                        metrics[key] = int(value)
+                    except ValueError:
+                        continue
+                stats[family.lower()] = metrics
+    except Exception:
+        return {}
+
+    return stats
+
+
+def load_socket_usage(logger=None):
+    sockstat = read_sockstat_file("/proc/net/sockstat")
+    sockstat6 = read_sockstat_file("/proc/net/sockstat6")
+
+    try:
+        tcp_inuse = int(sockstat.get("tcp", {}).get("inuse", 0)) + int(
+            sockstat6.get("tcp6", {}).get("inuse", 0)
+        )
+        tcp_timewait = int(sockstat.get("tcp", {}).get("tw", 0))
+        tcp_orphan = int(sockstat.get("tcp", {}).get("orphan", 0))
+        tcp_alloc = int(sockstat.get("tcp", {}).get("alloc", 0))
+        udp_inuse = int(sockstat.get("udp", {}).get("inuse", 0)) + int(
+            sockstat6.get("udp6", {}).get("inuse", 0)
+        )
+        raw_inuse = int(sockstat.get("raw", {}).get("inuse", 0)) + int(
+            sockstat6.get("raw6", {}).get("inuse", 0)
+        )
+        sockets_used = int(sockstat.get("sockets", {}).get("used", 0))
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("Failed to parse socket counters: %s", exc)
+        return None
+
+    return {
+        "sockets_used": sockets_used,
+        "tcp_inuse": tcp_inuse,
+        "tcp_timewait": tcp_timewait,
+        "tcp_orphan": tcp_orphan,
+        "tcp_alloc": tcp_alloc,
+        "udp_inuse": udp_inuse,
+        "raw_inuse": raw_inuse,
+    }
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run server shard assignments with dynamic worker queue scheduling"
@@ -607,6 +670,18 @@ def build_progress_lines(state, global_results, active_processes, master_config,
         lines.append(
             "storage_uploaded_media: "
             f"<code>{format_bytes(storage_usage['total_bytes'])} ({storage_usage['uploaded_count']} videos)</code>"
+        )
+    socket_usage = load_socket_usage(logger=logger)
+    if socket_usage is not None:
+        lines.append(
+            "sockets: "
+            f"<code>used={socket_usage['sockets_used']} "
+            f"tcp_inuse={socket_usage['tcp_inuse']} "
+            f"tcp_tw={socket_usage['tcp_timewait']} "
+            f"tcp_orphan={socket_usage['tcp_orphan']} "
+            f"tcp_alloc={socket_usage['tcp_alloc']} "
+            f"udp_inuse={socket_usage['udp_inuse']} "
+            f"raw_inuse={socket_usage['raw_inuse']}</code>"
         )
     for worker_name in sorted(active_processes):
         item = active_processes[worker_name]
