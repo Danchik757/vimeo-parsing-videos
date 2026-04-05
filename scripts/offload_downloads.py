@@ -107,6 +107,13 @@ def now_string():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def require_numeric_video_id(value, field_name="video_id"):
+    candidate = str(value).strip() if value is not None else ""
+    if not candidate.isdigit():
+        raise ValueError(f"{field_name} must be a numeric Vimeo ID: {value!r}")
+    return candidate
+
+
 def load_registry(path):
     path = Path(path)
     if not path.exists():
@@ -201,9 +208,10 @@ def find_completed_downloads(videos_root, min_file_age_seconds):
 
 
 def build_remote_paths(storage_root, video_id, media_path):
-    remote_dir = Path(storage_root) / "downloaded" / str(video_id)
+    normalized_video_id = require_numeric_video_id(video_id)
+    remote_dir = Path(storage_root) / "downloaded" / normalized_video_id
     remote_video = remote_dir / media_path.name
-    remote_metadata = remote_dir / f"{video_id}.json"
+    remote_metadata = remote_dir / f"{normalized_video_id}.json"
     return remote_dir, remote_video, remote_metadata
 
 
@@ -249,7 +257,10 @@ def process_candidate(
     logger,
     delete_local_video,
 ):
-    video_id = str(payload.get("_video_id") or metadata_path.stem)
+    video_id = require_numeric_video_id(
+        payload.get("_video_id") or metadata_path.stem,
+        field_name="_video_id",
+    )
     offload_cfg = config["offload"]
     registry_items = registry.setdefault("items", {})
     existing_record = registry_items.get(video_id) or {}

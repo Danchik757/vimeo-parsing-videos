@@ -545,12 +545,36 @@ def parse_content_range_total(header_value):
     return int(total_part)
 
 
-def extract_video_id(video_url):
-    parsed = urlparse(video_url)
+def coerce_numeric_video_id(value):
+    if value is None:
+        return None
+
+    candidate = str(value).strip()
+    if not candidate:
+        return None
+
+    parsed = urlparse(candidate)
     path = parsed.path.rstrip("/")
-    if not path:
-        return video_url.rstrip("/").split("/")[-1]
-    return path.split("/")[-1]
+    if path:
+        segments = [segment.strip() for segment in path.split("/") if segment.strip()]
+        for segment in reversed(segments):
+            if segment.isdigit():
+                return segment
+        if segments:
+            candidate = segments[-1]
+
+    return candidate if candidate.isdigit() else None
+
+
+def require_numeric_video_id(value, field_name="video_id"):
+    normalized = coerce_numeric_video_id(value)
+    if normalized is None:
+        raise ValueError(f"{field_name} must resolve to a numeric Vimeo ID: {value!r}")
+    return normalized
+
+
+def extract_video_id(video_url):
+    return require_numeric_video_id(video_url, field_name="video_url")
 
 
 def current_network_label(config):
@@ -643,37 +667,36 @@ def download_file_via_curl(url, local_filename, runtime_state, logger, config, v
     cmd.append(url)
     logger.info("Downloading %s via curl on interface %s", video_id, download_interface)
 
-    process = subprocess.Popen(
+    stderr_output = ""
+    with subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
-    )
+    ) as process:
+        last_log_ts = time.time()
+        last_size = existing_size
+        while True:
+            return_code = process.poll()
+            current_size = part_path.stat().st_size if part_path.exists() else existing_size
+            runtime_state.touch("downloading file", video_id)
 
-    last_log_ts = time.time()
-    last_size = existing_size
-    while True:
-        return_code = process.poll()
-        current_size = part_path.stat().st_size if part_path.exists() else existing_size
-        runtime_state.touch("downloading file", video_id)
+            if time.time() - last_log_ts >= progress_log_every:
+                if current_size != last_size or current_size > 0:
+                    logger.info(
+                        "Download progress for %s: %d MB",
+                        video_id,
+                        int(current_size / (1024 * 1024)),
+                    )
+                    last_size = current_size
+                last_log_ts = time.time()
 
-        if time.time() - last_log_ts >= progress_log_every:
-            if current_size != last_size or current_size > 0:
-                logger.info(
-                    "Download progress for %s: %d MB",
-                    video_id,
-                    int(current_size / (1024 * 1024)),
-                )
-                last_size = current_size
-            last_log_ts = time.time()
+            if return_code is not None:
+                break
+            time.sleep(1)
 
-        if return_code is not None:
-            break
-        time.sleep(1)
-
-    stderr_output = ""
-    if process.stderr is not None:
-        stderr_output = process.stderr.read().strip()
+        if process.stderr is not None:
+            stderr_output = process.stderr.read().strip()
 
     if return_code != 0:
         error_message = stderr_output.splitlines()[-1] if stderr_output else f"curl exited with {return_code}"
@@ -917,7 +940,8 @@ def load_existing_download_metadata(metadata_path, config=None, logger=None):
 
 
 def get_video_storage_dir(video_dir, video_id):
-    return Path(video_dir) / "downloaded" / str(video_id)
+    normalized_video_id = require_numeric_video_id(video_id)
+    return Path(video_dir) / "downloaded" / normalized_video_id
 
 
 def get_metadata_bucket(status, result=None):
@@ -934,11 +958,12 @@ def get_download_status_root(video_dir, status, result=None):
 
 
 def get_video_metadata_path(video_dir, video_id, status="downloaded", result=None):
+    normalized_video_id = require_numeric_video_id(video_id)
     bucket = get_metadata_bucket(status, result=result)
     if bucket == "downloaded":
-        storage_dir = Path(video_dir) / bucket / str(video_id)
-        return storage_dir / f"{video_id}.json"
-    return Path(video_dir) / bucket / f"{video_id}.json"
+        storage_dir = Path(video_dir) / bucket / normalized_video_id
+        return storage_dir / f"{normalized_video_id}.json"
+    return Path(video_dir) / bucket / f"{normalized_video_id}.json"
 
 
 def extract_canonical_video_id(video_id, json_data=None, result=None):
@@ -969,13 +994,11 @@ def extract_canonical_video_id(video_id, json_data=None, result=None):
         )
 
     for candidate in candidates:
-        if candidate is None:
-            continue
-        candidate = str(candidate).strip()
-        if candidate.isdigit():
-            return candidate
+        normalized = coerce_numeric_video_id(candidate)
+        if normalized is not None:
+            return normalized
 
-    return str(video_id)
+    return require_numeric_video_id(video_id)
 
 
 def normalize_download_option(option):
@@ -1499,8 +1522,9 @@ def download_video(
                     logger.error(result["error"])
                     try:
                         page_source = sb.get_page_source()
+                        debug_video_id = require_numeric_video_id(video_id)
                         debug_file = Path(config["files"]["logs_dir"]) / (
-                            f"cloudflare_fail_{video_id}.html"
+                            f"cloudflare_fail_{debug_video_id}.html"
                         )
                         with open(debug_file, "w", encoding="utf-8") as f:
                             f.write(page_source)
@@ -1546,8 +1570,9 @@ def download_video(
                 logger.error("Download button not found for %s: %s", video_id, exc)
                 try:
                     page_source = sb.get_page_source()
+                    debug_video_id = require_numeric_video_id(video_id)
                     debug_file = Path(config["files"]["logs_dir"]) / (
-                        f"no_button_{video_id}.html"
+                        f"no_button_{debug_video_id}.html"
                     )
                     with open(debug_file, "w", encoding="utf-8") as f:
                         f.write(page_source)
@@ -1908,7 +1933,8 @@ def checkpoint_resume_state(
 
 def find_existing_completed_file(video_dir, video_id):
     video_dir = Path(video_dir)
-    per_video_dir = get_video_storage_dir(video_dir, video_id)
+    normalized_video_id = require_numeric_video_id(video_id)
+    per_video_dir = get_video_storage_dir(video_dir, normalized_video_id)
     search_roots = []
     if per_video_dir.exists():
         search_roots.append(per_video_dir)
@@ -1916,7 +1942,7 @@ def find_existing_completed_file(video_dir, video_id):
 
     seen = set()
     for root in search_roots:
-        pattern = f"{video_id}*"
+        pattern = f"{normalized_video_id}*"
         for candidate in sorted(root.glob(pattern)):
             candidate = candidate.resolve()
             if candidate in seen:
@@ -1948,18 +1974,19 @@ def should_skip_offloaded_metadata(existing_metadata, config):
 
 
 def resolve_existing_metadata_path(video_dir, json_dir, video_id):
+    normalized_video_id = require_numeric_video_id(video_id)
     for status in ("downloaded", "skipped", "failed"):
-        preferred = get_video_metadata_path(video_dir, video_id, status=status)
+        preferred = get_video_metadata_path(video_dir, normalized_video_id, status=status)
         if preferred.exists():
             return preferred
     for bucket in ("not_downloaded", "no_links"):
-        preferred = Path(video_dir) / bucket / f"{video_id}.json"
+        preferred = Path(video_dir) / bucket / f"{normalized_video_id}.json"
         if preferred.exists():
             return preferred
-    legacy = Path(json_dir) / f"{video_id}.json"
+    legacy = Path(json_dir) / f"{normalized_video_id}.json"
     if legacy.exists():
         return legacy
-    return get_video_metadata_path(video_dir, video_id, status="downloaded")
+    return get_video_metadata_path(video_dir, normalized_video_id, status="downloaded")
 
 
 def api_error_payload(response):
