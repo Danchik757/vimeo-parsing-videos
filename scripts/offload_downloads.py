@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -107,11 +108,16 @@ def now_string():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def require_numeric_video_id(value, field_name="video_id"):
+def normalize_video_storage_key(value, field_name="video_id"):
     candidate = str(value).strip() if value is not None else ""
-    if not candidate.isdigit():
-        raise ValueError(f"{field_name} must be a numeric Vimeo ID: {value!r}")
-    return candidate
+    if not candidate:
+        raise ValueError(f"{field_name} is required")
+    if candidate.isdigit():
+        return candidate
+    safe_value = re.sub(r"[^A-Za-z0-9._-]+", "_", candidate).strip("._")
+    if not safe_value or safe_value in {".", ".."}:
+        raise ValueError(f"{field_name} must resolve to a safe storage key: {value!r}")
+    return safe_value
 
 
 def load_registry(path):
@@ -208,7 +214,7 @@ def find_completed_downloads(videos_root, min_file_age_seconds):
 
 
 def build_remote_paths(storage_root, video_id, media_path):
-    normalized_video_id = require_numeric_video_id(video_id)
+    normalized_video_id = normalize_video_storage_key(video_id)
     remote_dir = Path(storage_root) / "downloaded" / normalized_video_id
     remote_video = remote_dir / media_path.name
     remote_metadata = remote_dir / f"{normalized_video_id}.json"
@@ -257,7 +263,7 @@ def process_candidate(
     logger,
     delete_local_video,
 ):
-    video_id = require_numeric_video_id(
+    video_id = normalize_video_storage_key(
         payload.get("_video_id") or metadata_path.stem,
         field_name="_video_id",
     )

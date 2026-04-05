@@ -566,15 +566,41 @@ def coerce_numeric_video_id(value):
     return candidate if candidate.isdigit() else None
 
 
-def require_numeric_video_id(value, field_name="video_id"):
-    normalized = coerce_numeric_video_id(value)
-    if normalized is None:
-        raise ValueError(f"{field_name} must resolve to a numeric Vimeo ID: {value!r}")
-    return normalized
+def extract_video_identifier(value, field_name="video_id"):
+    if value is None:
+        raise ValueError(f"{field_name} is required")
+
+    candidate = str(value).strip()
+    if not candidate:
+        raise ValueError(f"{field_name} is required")
+
+    parsed = urlparse(candidate)
+    path = parsed.path.rstrip("/")
+    if path:
+        segments = [segment.strip() for segment in path.split("/") if segment.strip()]
+        if segments:
+            return segments[-1]
+
+    candidate = candidate.rstrip("/").split("/")[-1].strip()
+    if not candidate:
+        raise ValueError(f"{field_name} is required")
+    return candidate
+
+
+def normalize_video_storage_key(value, field_name="video_id"):
+    normalized_numeric = coerce_numeric_video_id(value)
+    if normalized_numeric is not None:
+        return normalized_numeric
+
+    identifier = extract_video_identifier(value, field_name=field_name)
+    safe_value = re.sub(r"[^A-Za-z0-9._-]+", "_", identifier).strip("._")
+    if not safe_value or safe_value in {".", ".."}:
+        raise ValueError(f"{field_name} must resolve to a safe storage key: {value!r}")
+    return safe_value
 
 
 def extract_video_id(video_url):
-    return require_numeric_video_id(video_url, field_name="video_url")
+    return extract_video_identifier(video_url, field_name="video_url")
 
 
 def current_network_label(config):
@@ -940,7 +966,7 @@ def load_existing_download_metadata(metadata_path, config=None, logger=None):
 
 
 def get_video_storage_dir(video_dir, video_id):
-    normalized_video_id = require_numeric_video_id(video_id)
+    normalized_video_id = normalize_video_storage_key(video_id)
     return Path(video_dir) / "downloaded" / normalized_video_id
 
 
@@ -958,7 +984,7 @@ def get_download_status_root(video_dir, status, result=None):
 
 
 def get_video_metadata_path(video_dir, video_id, status="downloaded", result=None):
-    normalized_video_id = require_numeric_video_id(video_id)
+    normalized_video_id = normalize_video_storage_key(video_id)
     bucket = get_metadata_bucket(status, result=result)
     if bucket == "downloaded":
         storage_dir = Path(video_dir) / bucket / normalized_video_id
@@ -998,7 +1024,7 @@ def extract_canonical_video_id(video_id, json_data=None, result=None):
         if normalized is not None:
             return normalized
 
-    return require_numeric_video_id(video_id)
+    return normalize_video_storage_key(video_id)
 
 
 def normalize_download_option(option):
@@ -1522,7 +1548,7 @@ def download_video(
                     logger.error(result["error"])
                     try:
                         page_source = sb.get_page_source()
-                        debug_video_id = require_numeric_video_id(video_id)
+                        debug_video_id = normalize_video_storage_key(video_id)
                         debug_file = Path(config["files"]["logs_dir"]) / (
                             f"cloudflare_fail_{debug_video_id}.html"
                         )
@@ -1570,7 +1596,7 @@ def download_video(
                 logger.error("Download button not found for %s: %s", video_id, exc)
                 try:
                     page_source = sb.get_page_source()
-                    debug_video_id = require_numeric_video_id(video_id)
+                    debug_video_id = normalize_video_storage_key(video_id)
                     debug_file = Path(config["files"]["logs_dir"]) / (
                         f"no_button_{debug_video_id}.html"
                     )
@@ -1933,7 +1959,7 @@ def checkpoint_resume_state(
 
 def find_existing_completed_file(video_dir, video_id):
     video_dir = Path(video_dir)
-    normalized_video_id = require_numeric_video_id(video_id)
+    normalized_video_id = normalize_video_storage_key(video_id)
     per_video_dir = get_video_storage_dir(video_dir, normalized_video_id)
     search_roots = []
     if per_video_dir.exists():
@@ -1974,7 +2000,7 @@ def should_skip_offloaded_metadata(existing_metadata, config):
 
 
 def resolve_existing_metadata_path(video_dir, json_dir, video_id):
-    normalized_video_id = require_numeric_video_id(video_id)
+    normalized_video_id = normalize_video_storage_key(video_id)
     for status in ("downloaded", "skipped", "failed"):
         preferred = get_video_metadata_path(video_dir, normalized_video_id, status=status)
         if preferred.exists():
