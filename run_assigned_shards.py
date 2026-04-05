@@ -35,6 +35,56 @@ def write_json(path, payload):
     temp_path.replace(path)
 
 
+def format_bytes(num_bytes):
+    size = float(max(0, int(num_bytes or 0)))
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    unit_index = 0
+    while size >= 1024 and unit_index < len(units) - 1:
+        size /= 1024.0
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(size)} {units[unit_index]}"
+    return f"{size:.1f} {units[unit_index]}"
+
+
+def load_offload_storage_usage(config, logger=None):
+    offload_cfg = config.get("offload", {})
+    if not offload_cfg.get("enabled"):
+        return None
+
+    registry_value = offload_cfg.get("registry_file") or ""
+    if not registry_value:
+        return None
+
+    registry_path = Path(registry_value)
+    if not registry_path.exists():
+        return {"uploaded_count": 0, "total_bytes": 0}
+
+    try:
+        registry = read_json(registry_path)
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("Failed to read offload registry %s: %s", registry_path, exc)
+        return None
+
+    total_bytes = 0
+    uploaded_count = 0
+    items = registry.get("items", {})
+    if not isinstance(items, dict):
+        return {"uploaded_count": 0, "total_bytes": 0}
+
+    for item in items.values():
+        if not isinstance(item, dict) or item.get("status") != "uploaded":
+            continue
+        uploaded_count += 1
+        try:
+            total_bytes += max(0, int(item.get("file_size_bytes") or 0))
+        except (TypeError, ValueError):
+            continue
+
+    return {"uploaded_count": uploaded_count, "total_bytes": total_bytes}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run server shard assignments with dynamic worker queue scheduling"
@@ -534,7 +584,7 @@ def next_pending_batch(state):
     return None
 
 
-def build_progress_lines(state, global_results, active_processes):
+def build_progress_lines(state, global_results, active_processes, master_config, logger=None):
     snapshot = build_progress_snapshot(global_results, active_processes)
     counts = snapshot["counts"]
     items = state.get("items", {})
@@ -552,6 +602,12 @@ def build_progress_lines(state, global_results, active_processes):
         f"failed_logged: <code>{int(counts.get('failed', 0))}</code>",
         f"batches: <code>completed={completed_batches} running={running_batches} pending={pending_batches} failed={failed_batches}</code>",
     ]
+    storage_usage = load_offload_storage_usage(master_config, logger=logger)
+    if storage_usage is not None:
+        lines.append(
+            "storage_uploaded_media: "
+            f"<code>{format_bytes(storage_usage['total_bytes'])} ({storage_usage['uploaded_count']} videos)</code>"
+        )
     for worker_name in sorted(active_processes):
         item = active_processes[worker_name]
         live_counts = snapshot["worker_live"].get(worker_name, {})
@@ -875,7 +931,13 @@ def main():
         if progress_every_seconds > 0 and now - last_progress_ts >= progress_every_seconds:
             telegram.notify_custom(
                 "Coordinator progress",
-                build_progress_lines(state, global_results, active_processes),
+                build_progress_lines(
+                    state,
+                    global_results,
+                    active_processes,
+                    master_config,
+                    logger=logger,
+                ),
             )
             last_progress_ts = now
 

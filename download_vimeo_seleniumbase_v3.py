@@ -100,6 +100,7 @@ def load_config(config_path):
     settings.setdefault("login_completion_timeout_seconds", 30)
     settings.setdefault("login_retry_attempts", 3)
     settings.setdefault("login_retry_delay_seconds", 10)
+    settings.setdefault("page_load_timeout_seconds", 120)
 
     login_cfg = config.setdefault("vimeo_login", {})
     login_cfg.setdefault("email", "")
@@ -570,6 +571,17 @@ def is_probable_ip_block(error_message):
         "rate limit exceeded",
     ]
     return any(indicator in message for indicator in indicators)
+
+
+def close_response_quietly(response):
+    if response is None:
+        return
+    close = getattr(response, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
 
 
 def download_file_via_curl(url, local_filename, runtime_state, logger, config, video_id, interface_name=None):
@@ -2117,6 +2129,13 @@ def main():
                 logger.info("Authenticated Vimeo session requested for this worker")
             with SB(**sb_kwargs) as sb:
                 logger.info("SeleniumBase browser started")
+                page_load_timeout = int(config["settings"].get("page_load_timeout_seconds", 120))
+                if page_load_timeout > 0:
+                    try:
+                        sb.driver.set_page_load_timeout(page_load_timeout)
+                        logger.info("Browser page load timeout set to %ds", page_load_timeout)
+                    except Exception as exc:
+                        logger.warning("Failed to set page load timeout: %s", exc)
                 if bool(config["runtime"].get("vimeo_authenticated_session", False)):
                     runtime_state.touch("logging into vimeo")
                     login_to_vimeo(sb, login_email, login_password, logger, config)
@@ -2229,6 +2248,7 @@ def main():
                     logger.info("URL: %s", video_url)
                     logger.info("%s", "=" * 80)
 
+                    response = None
                     try:
                         logger.info("Checking video %s via API...", video_id)
                         response = client.get(f"https://api.vimeo.com/videos/{video_id}")
@@ -2825,6 +2845,8 @@ def main():
                             len(urls),
                             stage="api_check",
                         )
+                    finally:
+                        close_response_quietly(response)
 
     except Exception as exc:
         fatal_error = str(exc)

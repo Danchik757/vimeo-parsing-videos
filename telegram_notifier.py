@@ -219,6 +219,7 @@ class TelegramNotifier:
 
         last_error = None
         for attempt in range(1, self.retry_attempts + 1):
+            response = None
             try:
                 response = self._session.post(
                     url,
@@ -245,6 +246,12 @@ class TelegramNotifier:
                     self.retry_attempts,
                     exc,
                 )
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
 
             if attempt < self.retry_attempts and self.retry_delay_seconds > 0:
                 time.sleep(self.retry_delay_seconds)
