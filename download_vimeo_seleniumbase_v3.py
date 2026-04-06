@@ -115,7 +115,7 @@ def load_config(config_path):
         max(180, int(settings.get("page_load_timeout_seconds", 120) or 120) + 60),
     )
     settings.setdefault("cloudflare_stage_timeout_seconds", 180)
-    settings.setdefault("video_processing_timeout_seconds", 900)
+    settings.setdefault("video_processing_timeout_seconds", 1200)
     settings.setdefault("download_http_pool_connections", 2)
     settings.setdefault("download_http_pool_maxsize", 4)
 
