@@ -148,6 +148,34 @@ def load_socket_usage(logger=None):
     }
 
 
+def evaluate_socket_pressure(config, logger=None):
+    workers_cfg = config.get("workers", {})
+    if not bool(workers_cfg.get("socket_pressure_gate_enabled", True)):
+        return None
+
+    socket_usage = load_socket_usage(logger=logger)
+    if socket_usage is None:
+        return None
+
+    checks = (
+        ("tcp_inuse", "max_tcp_inuse_to_start_worker"),
+        ("tcp_timewait", "max_tcp_timewait_to_start_worker"),
+        ("tcp_orphan", "max_tcp_orphan_to_start_worker"),
+    )
+    reasons = []
+    for metric_key, limit_key in checks:
+        limit = int(workers_cfg.get(limit_key, 0) or 0)
+        if limit > 0 and int(socket_usage.get(metric_key, 0)) >= limit:
+            reasons.append(
+                f"{metric_key}={int(socket_usage.get(metric_key, 0))} >= {limit_key}={limit}"
+            )
+
+    if not reasons:
+        return None
+
+    return {"usage": socket_usage, "reasons": reasons}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run server shard assignments with dynamic worker queue scheduling"
@@ -792,6 +820,7 @@ def main():
     stop_requested = False
     exit_code = 0
     last_progress_ts = 0.0
+    last_socket_pressure_log_ts = 0.0
 
     while True:
         if not stop_requested:
@@ -799,6 +828,28 @@ def main():
                 slot_name = f"worker-{slot_index:02d}"
                 if slot_name in active_processes:
                     continue
+
+                socket_pressure = evaluate_socket_pressure(master_config, logger=logger)
+                if socket_pressure is not None:
+                    now = time.time()
+                    cooldown_seconds = max(
+                        5,
+                        int(
+                            master_config.get("workers", {}).get(
+                                "socket_pressure_cooldown_seconds",
+                                30,
+                            )
+                            or 30
+                        ),
+                    )
+                    if now - last_socket_pressure_log_ts >= cooldown_seconds:
+                        logger.warning(
+                            "Delaying new worker start due to socket pressure: %s",
+                            "; ".join(socket_pressure["reasons"]),
+                        )
+                        last_socket_pressure_log_ts = now
+                    break
+
                 batch_item = next_pending_batch(state)
                 if batch_item is None:
                     break

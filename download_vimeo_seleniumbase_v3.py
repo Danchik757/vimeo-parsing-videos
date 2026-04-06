@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 import requests
 import vimeo
+from requests.adapters import HTTPAdapter
 from seleniumbase import SB
 from selenium.webdriver.common.action_chains import ActionChains
 
@@ -81,6 +82,9 @@ def load_config(config_path):
     settings.setdefault("test_limit", 50)
     settings.setdefault("retry_attempts", 3)
     settings.setdefault("retry_delay", 5)
+    settings.setdefault("retry_backoff_multiplier", 2.0)
+    settings.setdefault("retry_backoff_max_delay_seconds", 60)
+    settings.setdefault("retry_jitter_seconds", 2)
     settings.setdefault("javascript_wait_time", 15)
     settings.setdefault("download_timeout", 600)
     settings.setdefault("connect_timeout", 30)
@@ -107,6 +111,8 @@ def load_config(config_path):
         max(180, int(settings.get("page_load_timeout_seconds", 120) or 120) + 60),
     )
     settings.setdefault("cloudflare_stage_timeout_seconds", 180)
+    settings.setdefault("download_http_pool_connections", 2)
+    settings.setdefault("download_http_pool_maxsize", 4)
 
     login_cfg = config.setdefault("vimeo_login", {})
     login_cfg.setdefault("email", "")
@@ -160,6 +166,11 @@ def load_config(config_path):
     workers.setdefault("count", 1)
     workers.setdefault("stagger_start_seconds", 3)
     workers.setdefault("shared_media_dirs", False)
+    workers.setdefault("socket_pressure_gate_enabled", True)
+    workers.setdefault("max_tcp_inuse_to_start_worker", 120)
+    workers.setdefault("max_tcp_timewait_to_start_worker", 500)
+    workers.setdefault("max_tcp_orphan_to_start_worker", 32)
+    workers.setdefault("socket_pressure_cooldown_seconds", 30)
 
     batches = config.setdefault("batches", {})
     batches.setdefault("enabled", False)
@@ -696,6 +707,45 @@ def close_response_quietly(response):
             pass
 
 
+def close_session_quietly(session):
+    if session is None:
+        return
+    close = getattr(session, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def build_download_http_session(config):
+    settings = config["settings"]
+    pool_connections = max(1, int(settings.get("download_http_pool_connections", 2) or 2))
+    pool_maxsize = max(1, int(settings.get("download_http_pool_maxsize", 4) or 4))
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=pool_connections,
+        pool_maxsize=pool_maxsize,
+        max_retries=0,
+        pool_block=True,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def compute_retry_delay(settings, attempt_number):
+    base_delay = max(0.0, float(settings.get("retry_delay", 5) or 0))
+    multiplier = max(1.0, float(settings.get("retry_backoff_multiplier", 2.0) or 1.0))
+    max_delay = max(base_delay, float(settings.get("retry_backoff_max_delay_seconds", 60) or base_delay))
+    jitter = max(0.0, float(settings.get("retry_jitter_seconds", 2) or 0))
+    exponent = max(0, int(attempt_number) - 1)
+    delay = min(max_delay, base_delay * (multiplier ** exponent))
+    if jitter > 0:
+        delay += random.uniform(0.0, jitter)
+    return delay
+
+
 def download_file_via_curl(url, local_filename, runtime_state, logger, config, video_id, interface_name=None):
     settings = config["settings"]
     resume = config["resume"]
@@ -799,7 +849,7 @@ def download_file_via_curl(url, local_filename, runtime_state, logger, config, v
     return file_size_mb
 
 
-def download_file(url, local_filename, runtime_state, logger, config, video_id):
+def download_file(url, local_filename, runtime_state, logger, config, video_id, download_session=None):
     settings = config["settings"]
     resume = config["resume"]
     download_interface = (settings.get("download_interface") or "").strip()
@@ -853,7 +903,8 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id):
 
     try:
         while True:
-            with requests.get(
+            request_fn = download_session.get if download_session is not None else requests.get
+            with request_fn(
                 url,
                 stream=True,
                 timeout=(connect_timeout, read_timeout),
@@ -1458,6 +1509,7 @@ def download_video(
     logger,
     config,
     runtime_state,
+    download_session=None,
     login_email=None,
     login_password=None,
     cloudflare_retry_count=0,
@@ -1768,6 +1820,7 @@ def download_video(
             logger,
             config,
             video_id,
+            download_session=download_session,
         )
 
         result["success"] = True
@@ -2255,6 +2308,7 @@ def main():
     exit_code = 0
     login_email = None
     login_password = None
+    download_session = build_download_http_session(config)
 
     sb_kwargs = build_sb_kwargs(config, logger)
     logger.info("SeleniumBase args: %s", sb_kwargs)
@@ -2678,7 +2732,6 @@ def main():
                             )
 
                         retry_attempts = int(config["settings"]["retry_attempts"])
-                        retry_delay = int(config["settings"]["retry_delay"])
                         result = None
                         for attempt in range(1, retry_attempts + 1):
                             runtime_state.touch(f"download attempt {attempt}", video_id)
@@ -2691,6 +2744,7 @@ def main():
                                 logger,
                                 config,
                                 runtime_state,
+                                download_session=download_session,
                                 login_email=login_email,
                                 login_password=login_password,
                                 cloudflare_retry_count=attempt - 1,
@@ -2700,8 +2754,9 @@ def main():
                             if result.get("skipped_by_policy"):
                                 break
                             if attempt < retry_attempts:
+                                retry_delay = compute_retry_delay(config["settings"], attempt)
                                 logger.warning(
-                                    "Attempt %d/%d failed for %s: %s. Retrying in %ss",
+                                    "Attempt %d/%d failed for %s: %s. Retrying in %.1fs",
                                     attempt,
                                     retry_attempts,
                                     video_id,
@@ -3004,6 +3059,7 @@ def main():
     finally:
         watchdog.stop()
         watchdog.join(timeout=10)
+        close_session_quietly(download_session)
 
     total_processed = successful_downloads + skipped_videos + failed_videos
     if config["resume"]["enabled"] and total_processed >= len(urls):
