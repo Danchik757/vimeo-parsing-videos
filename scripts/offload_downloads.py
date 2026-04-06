@@ -46,16 +46,6 @@ def parse_args():
         help="Delete local media file after successful verified upload",
     )
     parser.add_argument(
-        "--no-ffprobe",
-        action="store_true",
-        help="Skip local/remote ffprobe validation for faster emergency offload cleanup",
-    )
-    parser.add_argument(
-        "--existing-remote-only",
-        action="store_true",
-        help="Only reconcile/delete files that already exist on remote storage with matching size",
-    )
-    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -263,75 +253,6 @@ def mark_local_video_deleted(payload):
     payload["_offload"]["local_video_deleted_at"] = now_string()
 
 
-def build_registry_record(payload, metadata_path, media_path, remote_video, remote_metadata):
-    return {
-        "status": "uploaded",
-        "video_id": payload.get("_video_id") or metadata_path.stem,
-        "uploaded_at": payload["_offload"]["uploaded_at"],
-        "local_metadata_json": str(metadata_path),
-        "local_video_file": str(media_path) if media_path is not None else None,
-        "remote_video_file": str(remote_video),
-        "remote_metadata_json": str(remote_metadata),
-        "file_size_bytes": remote_video.stat().st_size,
-        "verified_with_ffprobe": bool(payload["_offload"].get("verified_with_ffprobe")),
-        "local_video_deleted": bool(payload["_offload"].get("local_video_deleted")),
-        "source_url": payload.get("_video_url"),
-        "selected_quality": (payload.get("_download") or {}).get("selected_quality"),
-        "is_original": (payload.get("_download") or {}).get("is_original"),
-    }
-
-
-def reconcile_existing_remote_copy(
-    payload,
-    metadata_path,
-    media_path,
-    remote_video,
-    remote_metadata,
-    storage_root,
-    existing_record,
-    registry_items,
-    delete_local_video,
-    logger,
-):
-    if media_path is None or remote_video is None or remote_metadata is None:
-        return False
-    payload_offload = payload.get("_offload") or {}
-    previously_uploaded = (
-        payload_offload.get("status") == "uploaded"
-        or existing_record.get("status") == "uploaded"
-    )
-    if not previously_uploaded:
-        return False
-    if not remote_file_matches(media_path, remote_video):
-        return False
-
-    update_offload_payload(payload, storage_root, remote_video, remote_metadata, verified_with_ffprobe=False)
-    if delete_local_video and media_path.exists():
-        media_path.unlink()
-        mark_local_video_deleted(payload)
-    save_metadata(metadata_path, payload)
-    copy_file_atomic(metadata_path, remote_metadata)
-
-    video_id = normalize_video_storage_key(
-        payload.get("_video_id") or metadata_path.stem,
-        field_name="_video_id",
-    )
-    registry_items[video_id] = build_registry_record(
-        payload,
-        metadata_path,
-        media_path,
-        remote_video,
-        remote_metadata,
-    )
-    logger.info(
-        "Reconciled existing remote copy for %s at %s%s",
-        video_id,
-        remote_video,
-        " and deleted local media" if payload["_offload"].get("local_video_deleted") else "",
-    )
-    return True
-
-
 def process_candidate(
     payload,
     metadata_path,
@@ -341,7 +262,6 @@ def process_candidate(
     config,
     logger,
     delete_local_video,
-    existing_remote_only=False,
 ):
     video_id = normalize_video_storage_key(
         payload.get("_video_id") or metadata_path.stem,
@@ -362,23 +282,6 @@ def process_candidate(
 
     if media_path is None:
         logger.info("Skipping %s because no local media file is present", video_id)
-        return False
-
-    if reconcile_existing_remote_copy(
-        payload,
-        metadata_path,
-        media_path,
-        remote_video,
-        remote_metadata,
-        storage_root,
-        existing_record,
-        registry_items,
-        delete_local_video,
-        logger,
-    ):
-        return True
-
-    if existing_remote_only:
         return False
 
     if existing_record.get("status") == "uploaded" and remote_video and remote_video.exists():
@@ -424,20 +327,25 @@ def process_candidate(
     copy_file_atomic(metadata_path, remote_metadata)
 
     registry_items[video_id] = {
-        **build_registry_record(
-            payload,
-            metadata_path,
-            media_path,
-            remote_video,
-            remote_metadata,
-        ),
+        "status": "uploaded",
+        "video_id": video_id,
+        "uploaded_at": payload["_offload"]["uploaded_at"],
+        "local_metadata_json": str(metadata_path),
+        "local_video_file": str(media_path),
+        "remote_video_file": str(remote_video),
+        "remote_metadata_json": str(remote_metadata),
+        "file_size_bytes": remote_video.stat().st_size,
         "verified_with_ffprobe": validate_with_ffprobe,
+        "local_video_deleted": bool(payload["_offload"].get("local_video_deleted")),
+        "source_url": payload.get("_video_url"),
+        "selected_quality": (payload.get("_download") or {}).get("selected_quality"),
+        "is_original": (payload.get("_download") or {}).get("is_original"),
     }
     logger.info("Offloaded %s to %s", video_id, remote_video)
     return True
 
 
-def run_cycle(config, storage_root, delete_local_video, limit, logger, existing_remote_only=False):
+def run_cycle(config, storage_root, delete_local_video, limit, logger):
     videos_root = Path(config["files"]["videos_dir"])
     registry_path = Path(config["offload"]["registry_file"])
     registry = load_registry(registry_path)
@@ -463,7 +371,6 @@ def run_cycle(config, storage_root, delete_local_video, limit, logger, existing_
                 config,
                 logger,
                 delete_local_video,
-                existing_remote_only=existing_remote_only,
             )
             if changed:
                 uploaded += 1
@@ -496,8 +403,6 @@ def main():
 
     storage_root = Path(storage_root_value).resolve()
     storage_root.mkdir(parents=True, exist_ok=True)
-    if args.no_ffprobe:
-        config["offload"]["validate_with_ffprobe"] = False
     delete_local_video = bool(
         args.delete_local_video or config["offload"].get("delete_local_video_after_upload", False)
     )
@@ -510,30 +415,14 @@ def main():
     logger.info("Config: %s", config["_meta"]["config_path"])
     logger.info("Storage root: %s", storage_root)
     logger.info("Delete local video after upload: %s", delete_local_video)
-    logger.info("Validate with ffprobe: %s", bool(config["offload"].get("validate_with_ffprobe", True)))
-    logger.info("Existing remote only: %s", bool(args.existing_remote_only))
 
     if not args.watch:
-        run_cycle(
-            config,
-            storage_root,
-            delete_local_video,
-            args.limit,
-            logger,
-            existing_remote_only=args.existing_remote_only,
-        )
+        run_cycle(config, storage_root, delete_local_video, args.limit, logger)
         return 0
 
     logger.info("Starting watch mode with interval=%ss", interval)
     while True:
-        run_cycle(
-            config,
-            storage_root,
-            delete_local_video,
-            args.limit,
-            logger,
-            existing_remote_only=args.existing_remote_only,
-        )
+        run_cycle(config, storage_root, delete_local_video, args.limit, logger)
         time.sleep(interval)
 
 
