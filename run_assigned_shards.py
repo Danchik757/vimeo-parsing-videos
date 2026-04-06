@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -735,10 +737,21 @@ def build_progress_lines(state, global_results, active_processes, master_config,
 
 
 def terminate_process(process, logger, label):
-    try:
-        process.terminate()
-    except Exception:
-        return
+    pgid = None
+    if getattr(process, "pid", None):
+        pgid = int(process.pid)
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pgid = None
+        except Exception:
+            pgid = None
+
+    if pgid is None:
+        try:
+            process.terminate()
+        except Exception:
+            return
 
     deadline = time.time() + 10
     while time.time() < deadline:
@@ -747,8 +760,44 @@ def terminate_process(process, logger, label):
         time.sleep(0.5)
 
     logger.warning("Force-killing %s after terminate timeout", label)
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except Exception:
+            pass
     try:
         process.kill()
+    except Exception:
+        pass
+
+
+def cleanup_process_group_after_exit(process, logger, label):
+    if not getattr(process, "pid", None):
+        return
+    try:
+        os.killpg(int(process.pid), signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception as exc:
+        logger.debug("Could not clean process group for %s: %s", label, exc)
+        return
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            os.killpg(int(process.pid), 0)
+        except ProcessLookupError:
+            return
+        except Exception:
+            return
+        time.sleep(0.2)
+
+    logger.warning("Force-killing leftover process group for %s", label)
+    try:
+        os.killpg(int(process.pid), signal.SIGKILL)
     except Exception:
         pass
 
@@ -888,6 +937,7 @@ def main():
                     cwd=str(PROJECT_ROOT),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.STDOUT,
+                    start_new_session=True,
                 )
                 active_processes[slot_name] = {
                     "worker_name": worker_name,
@@ -934,6 +984,7 @@ def main():
                 batch_number,
                 return_code,
             )
+            cleanup_process_group_after_exit(process, logger, slot_name)
 
             state_item = state["items"][batch_key]
             state_item["finished_at"] = now_string()

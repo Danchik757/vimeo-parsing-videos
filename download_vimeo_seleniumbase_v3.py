@@ -172,10 +172,10 @@ def load_config(config_path):
     workers.setdefault("stagger_start_seconds", 3)
     workers.setdefault("shared_media_dirs", False)
     workers.setdefault("socket_pressure_gate_enabled", True)
-    workers.setdefault("max_tcp_inuse_to_start_worker", 120)
+    workers.setdefault("max_tcp_inuse_to_start_worker", 320)
     workers.setdefault("max_tcp_timewait_to_start_worker", 500)
-    workers.setdefault("max_tcp_orphan_to_start_worker", 32)
-    workers.setdefault("socket_pressure_cooldown_seconds", 30)
+    workers.setdefault("max_tcp_orphan_to_start_worker", 130)
+    workers.setdefault("socket_pressure_cooldown_seconds", 60)
     workers.setdefault("restart_after_processed", 400)
     workers.setdefault("consecutive_timeout_failures_before_restart", 3)
 
