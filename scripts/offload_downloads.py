@@ -288,11 +288,19 @@ def reconcile_existing_remote_copy(
     remote_video,
     remote_metadata,
     storage_root,
+    existing_record,
     registry_items,
     delete_local_video,
     logger,
 ):
     if media_path is None or remote_video is None or remote_metadata is None:
+        return False
+    payload_offload = payload.get("_offload") or {}
+    previously_uploaded = (
+        payload_offload.get("status") == "uploaded"
+        or existing_record.get("status") == "uploaded"
+    )
+    if not previously_uploaded:
         return False
     if not remote_file_matches(media_path, remote_video):
         return False
@@ -363,6 +371,7 @@ def process_candidate(
         remote_video,
         remote_metadata,
         storage_root,
+        existing_record,
         registry_items,
         delete_local_video,
         logger,
