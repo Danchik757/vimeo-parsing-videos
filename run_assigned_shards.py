@@ -9,7 +9,12 @@ import sys
 import time
 from pathlib import Path
 
-from download_vimeo_seleniumbase_v3 import PROJECT_ROOT, load_config, setup_logger
+from download_vimeo_seleniumbase_v3 import (
+    CONTROLLED_RESTART_EXIT_CODE,
+    PROJECT_ROOT,
+    load_config,
+    setup_logger,
+)
 from result_exports import write_result_url_lists
 from telegram_notifier import TelegramNotifier
 
@@ -511,6 +516,7 @@ def build_worker_slot_summary(slot_name, slot_index, batch_number=None):
         "downloaded": 0,
         "skipped": 0,
         "failed": 0,
+        "restarts_requested": 0,
         "total_processed": 0,
         "updated_at": now_string(),
     }
@@ -528,6 +534,7 @@ def load_worker_slot_summary(slot_dir, slot_name, slot_index):
     payload.setdefault("downloaded", 0)
     payload.setdefault("skipped", 0)
     payload.setdefault("failed", 0)
+    payload.setdefault("restarts_requested", 0)
     payload.setdefault("total_processed", 0)
     return payload
 
@@ -933,7 +940,43 @@ def main():
             state_item["exit_code"] = return_code
             slot_summaries[slot_name]["active_batch_number"] = None
 
-            if return_code == 0 and batch_summary_path.exists() and batch_results_path.exists():
+            if return_code == CONTROLLED_RESTART_EXIT_CODE:
+                state_item["status"] = "pending"
+                state_item["assigned_worker"] = None
+                state_item["exit_code"] = None
+                state_item["last_error"] = None
+                state_item["last_restart"] = {
+                    "at": now_string(),
+                    "batch_number": batch_number,
+                    "exit_code": return_code,
+                    "summary_exists": bool(batch_summary_path.exists()),
+                    "results_exists": bool(batch_results_path.exists()),
+                }
+                slot_summaries[slot_name]["restarts_requested"] = int(
+                    slot_summaries[slot_name].get("restarts_requested", 0)
+                ) + 1
+                save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
+                logger.warning(
+                    "Batch %04d requested controlled restart (exit_code=%s, summary=%s, results=%s); re-queueing without failure",
+                    batch_number,
+                    return_code,
+                    batch_summary_path.exists(),
+                    batch_results_path.exists(),
+                )
+                if telegram.notify_on_error:
+                    telegram.notify_custom(
+                        "Assignment batch recycle",
+                        [
+                            f"worker: <code>{slot_name}</code>",
+                            f"batch: <code>{batch_number:04d}</code>",
+                            f"shard: <code>{Path(item['source_json']).name}</code>",
+                            f"exit_code: <code>{return_code}</code>",
+                            f"summary_exists: <code>{batch_summary_path.exists()}</code>",
+                            f"results_exists: <code>{batch_results_path.exists()}</code>",
+                            "action: <code>requeued with existing resume state</code>",
+                        ],
+                    )
+            elif return_code == 0 and batch_summary_path.exists() and batch_results_path.exists():
                 batch_summary = read_json(batch_summary_path)
                 batch_results = read_json(batch_results_path)
                 merge_shard_results(global_results, batch_results, batch_number, slot_name)

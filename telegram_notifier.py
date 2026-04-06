@@ -470,6 +470,11 @@ class TelegramNotifier:
         failed = stats.get("failed", 0)
         exit_code = stats.get("exit_code", 0)
         fatal_error = stats.get("fatal_error")
+        restart_requested = bool(stats.get("restart_requested"))
+        restart_reason = stats.get("restart_reason")
+
+        if restart_requested:
+            return
 
         title = "finish" if exit_code == 0 else "finish_with_error"
         lines = [

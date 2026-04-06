@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import platform
 import random
@@ -43,6 +44,9 @@ READING_TIME_MIN = 1
 READING_TIME_MAX = 3
 CLOUDFLARE_TIMEOUT_MIN = 40
 CLOUDFLARE_TIMEOUT_MAX = 60
+CONTROLLED_RESTART_EXIT_CODE = 75
+
+
 def load_config(config_path):
     config, config_path, config_dir, secrets_path = load_json_config_with_optional_secrets(config_path)
     config["_meta"] = {
@@ -111,6 +115,7 @@ def load_config(config_path):
         max(180, int(settings.get("page_load_timeout_seconds", 120) or 120) + 60),
     )
     settings.setdefault("cloudflare_stage_timeout_seconds", 180)
+    settings.setdefault("video_processing_timeout_seconds", 900)
     settings.setdefault("download_http_pool_connections", 2)
     settings.setdefault("download_http_pool_maxsize", 4)
 
@@ -171,6 +176,8 @@ def load_config(config_path):
     workers.setdefault("max_tcp_timewait_to_start_worker", 500)
     workers.setdefault("max_tcp_orphan_to_start_worker", 32)
     workers.setdefault("socket_pressure_cooldown_seconds", 30)
+    workers.setdefault("restart_after_processed", 400)
+    workers.setdefault("consecutive_timeout_failures_before_restart", 3)
 
     batches = config.setdefault("batches", {})
     batches.setdefault("enabled", False)
@@ -385,11 +392,15 @@ class ActivityWatchdog(threading.Thread):
                         "action: <code>terminating worker for queue retry</code>",
                     ],
                 )
-                os._exit(1)
+                os._exit(CONTROLLED_RESTART_EXIT_CODE)
 
 
 class StageTimeoutError(TimeoutError):
     """Raised when a browser interaction exceeds its hard timeout."""
+
+
+class ControlledWorkerRestart(RuntimeError):
+    """Raised when a worker should exit cleanly and resume in a fresh process."""
 
 
 def call_with_stage_timeout(timeout_seconds, description, func, *args, **kwargs):
@@ -414,6 +425,120 @@ def call_with_stage_timeout(timeout_seconds, description, func, *args, **kwargs)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0.0)
         signal.signal(signal.SIGALRM, previous_handler)
+
+
+def build_video_deadline(settings):
+    timeout_seconds = int(settings.get("video_processing_timeout_seconds", 0) or 0)
+    if timeout_seconds <= 0:
+        return None
+    return time.monotonic() + timeout_seconds
+
+
+def remaining_deadline_seconds(deadline_ts):
+    if deadline_ts is None:
+        return None
+    return deadline_ts - time.monotonic()
+
+
+def ensure_deadline_not_exceeded(deadline_ts, description):
+    remaining = remaining_deadline_seconds(deadline_ts)
+    if remaining is None:
+        return
+    if remaining <= 0:
+        raise StageTimeoutError(f"{description} exceeded overall video timeout")
+
+
+def resolve_stage_timeout(timeout_seconds, deadline_ts):
+    timeout_seconds = int(timeout_seconds or 0)
+    if timeout_seconds <= 0 or deadline_ts is None:
+        return timeout_seconds
+    remaining = remaining_deadline_seconds(deadline_ts)
+    if remaining is None:
+        return timeout_seconds
+    return max(1, min(timeout_seconds, int(math.ceil(remaining))))
+
+
+def clamp_sleep_seconds(seconds, deadline_ts, description):
+    seconds = float(seconds or 0)
+    if deadline_ts is None:
+        return seconds
+    remaining = remaining_deadline_seconds(deadline_ts)
+    if remaining is None or remaining <= 0:
+        raise StageTimeoutError(f"{description} exceeded overall video timeout")
+    return min(seconds, remaining)
+
+
+def terminate_subprocess_quietly(process, timeout_seconds=5):
+    try:
+        process.terminate()
+    except Exception:
+        return
+
+    deadline = time.time() + max(1, int(timeout_seconds))
+    while time.time() < deadline:
+        if process.poll() is not None:
+            return
+        time.sleep(0.2)
+
+    try:
+        process.kill()
+    except Exception:
+        pass
+
+
+def is_timeout_like_message(message):
+    text = str(message or "").lower()
+    if not text:
+        return False
+    markers = (
+        "timed out",
+        "timeout",
+        "time-out",
+        "read timed out",
+        "connecttimeout",
+        "connection timed out",
+        "stall timeout",
+        "overall video timeout",
+    )
+    if any(marker in text for marker in markers):
+        return True
+    return re.search(r"\bexceeded\s+\d+s\b", text) is not None
+
+
+def maybe_raise_controlled_restart(
+    config,
+    start_index,
+    current_index,
+    total_urls,
+    consecutive_timeout_failures,
+    logger,
+    video_id,
+):
+    if current_index >= total_urls:
+        return
+
+    worker_cfg = config.get("workers", {})
+    restart_after_processed = int(worker_cfg.get("restart_after_processed", 0) or 0)
+    if restart_after_processed > 0:
+        processed_in_this_worker = max(0, int(current_index) - int(start_index))
+        if processed_in_this_worker >= restart_after_processed:
+            reason = (
+                f"processed {processed_in_this_worker} URLs in this worker process; "
+                f"restarting to refresh browser/network state at video {video_id}"
+            )
+            logger.warning("Controlled worker restart requested: %s", reason)
+            raise ControlledWorkerRestart(reason)
+
+    timeout_restart_threshold = int(
+        worker_cfg.get("consecutive_timeout_failures_before_restart", 0) or 0
+    )
+    if timeout_restart_threshold > 0 and consecutive_timeout_failures >= timeout_restart_threshold:
+        reason = (
+            f"{consecutive_timeout_failures} consecutive timeout-like failures; "
+            f"restarting worker before retrying at video {video_id}"
+        )
+        logger.warning("Controlled worker restart requested: %s", reason)
+        raise ControlledWorkerRestart(reason)
 
 
 def simulate_mouse_movement(sb, logger):
@@ -746,7 +871,16 @@ def compute_retry_delay(settings, attempt_number):
     return delay
 
 
-def download_file_via_curl(url, local_filename, runtime_state, logger, config, video_id, interface_name=None):
+def download_file_via_curl(
+    url,
+    local_filename,
+    runtime_state,
+    logger,
+    config,
+    video_id,
+    interface_name=None,
+    deadline_ts=None,
+):
     settings = config["settings"]
     resume = config["resume"]
     connect_timeout = int(settings.get("connect_timeout", 30))
@@ -815,6 +949,18 @@ def download_file_via_curl(url, local_filename, runtime_state, logger, config, v
         last_log_ts = time.time()
         last_size = existing_size
         while True:
+            try:
+                ensure_deadline_not_exceeded(
+                    deadline_ts,
+                    f"downloading file for {video_id}",
+                )
+            except StageTimeoutError:
+                logger.warning(
+                    "Overall video timeout reached while curl was downloading %s; terminating curl process",
+                    video_id,
+                )
+                terminate_subprocess_quietly(process)
+                raise
             return_code = process.poll()
             current_size = part_path.stat().st_size if part_path.exists() else existing_size
             runtime_state.touch("downloading file", video_id)
@@ -849,7 +995,16 @@ def download_file_via_curl(url, local_filename, runtime_state, logger, config, v
     return file_size_mb
 
 
-def download_file(url, local_filename, runtime_state, logger, config, video_id, download_session=None):
+def download_file(
+    url,
+    local_filename,
+    runtime_state,
+    logger,
+    config,
+    video_id,
+    download_session=None,
+    deadline_ts=None,
+):
     settings = config["settings"]
     resume = config["resume"]
     download_interface = (settings.get("download_interface") or "").strip()
@@ -864,6 +1019,7 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id, 
             config,
             video_id,
             interface_name=download_interface,
+            deadline_ts=deadline_ts,
         )
 
     chunk_size = int(settings.get("download_chunk_size_kb", 1024)) * 1024
@@ -903,6 +1059,7 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id, 
 
     try:
         while True:
+            ensure_deadline_not_exceeded(deadline_ts, f"downloading file for {video_id}")
             request_fn = download_session.get if download_session is not None else requests.get
             with request_fn(
                 url,
@@ -957,6 +1114,7 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id, 
 
                 with open(part_path, write_mode) as f:
                     for chunk in response.iter_content(chunk_size=chunk_size):
+                        ensure_deadline_not_exceeded(deadline_ts, f"downloading file for {video_id}")
                         if not chunk:
                             continue
                         f.write(chunk)
@@ -997,6 +1155,7 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id, 
                 config,
                 video_id,
                 interface_name=download_retry_interface,
+                deadline_ts=deadline_ts,
             )
         raise
 
@@ -1513,6 +1672,7 @@ def download_video(
     login_email=None,
     login_password=None,
     cloudflare_retry_count=0,
+    video_deadline_ts=None,
 ):
     result = {
         "success": False,
@@ -1543,9 +1703,13 @@ def download_video(
         "authenticated_session": bool(config["runtime"].get("vimeo_authenticated_session", False)),
         "canonical_video_id": None,
         "file_path": None,
+        "timeout_like": False,
     }
 
     try:
+        if video_deadline_ts is None:
+            video_deadline_ts = build_video_deadline(config["settings"])
+        ensure_deadline_not_exceeded(video_deadline_ts, f"processing video {video_id}")
         api_download = extract_best_api_download(json_data)
         result["api_best_option"] = normalize_download_option(api_download)
         runtime_state.touch("checking direct api download", video_id)
@@ -1599,7 +1763,7 @@ def download_video(
             runtime_state.touch("opening video page", video_id)
             logger.info("Opening %s", video_url)
             call_with_stage_timeout(
-                page_open_stage_timeout,
+                resolve_stage_timeout(page_open_stage_timeout, video_deadline_ts),
                 f"opening video page for {video_id}",
                 sb.open,
                 video_url,
@@ -1607,6 +1771,11 @@ def download_video(
             result["page_visited"] = True
 
             initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
+            initial_wait = clamp_sleep_seconds(
+                initial_wait,
+                video_deadline_ts,
+                f"processing video {video_id}",
+            )
             logger.info("Waiting %.1fs for page load...", initial_wait)
             sb.sleep(initial_wait)
 
@@ -1637,13 +1806,18 @@ def download_video(
                 result["session_relogin"] = True
                 runtime_state.touch("opening video page", video_id)
                 call_with_stage_timeout(
-                    page_open_stage_timeout,
+                    resolve_stage_timeout(page_open_stage_timeout, video_deadline_ts),
                     f"re-opening video page for {video_id} after login",
                     sb.open,
                     video_url,
                 )
 
                 initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
+                initial_wait = clamp_sleep_seconds(
+                    initial_wait,
+                    video_deadline_ts,
+                    f"processing video {video_id}",
+                )
                 logger.info("Waiting %.1fs for page reload after login...", initial_wait)
                 sb.sleep(initial_wait)
                 try:
@@ -1666,6 +1840,11 @@ def download_video(
                     CLOUDFLARE_TIMEOUT_MAX,
                 )
                 cloudflare_timeout += cloudflare_retry_count * 10
+                cloudflare_timeout = clamp_sleep_seconds(
+                    cloudflare_timeout,
+                    video_deadline_ts,
+                    f"processing video {video_id}",
+                )
 
                 runtime_state.touch("waiting cloudflare auto-bypass", video_id)
                 logger.warning(
@@ -1678,7 +1857,7 @@ def download_video(
                     return check_if_cloudflare_blocked(sb, logger)
 
                 if call_with_stage_timeout(
-                    cloudflare_stage_timeout,
+                    resolve_stage_timeout(cloudflare_stage_timeout, video_deadline_ts),
                     f"cloudflare auto-bypass stage for {video_id}",
                     _wait_and_recheck_cloudflare,
                 ):
@@ -1703,12 +1882,19 @@ def download_video(
                 logger.info("Cloudflare bypassed successfully")
 
             runtime_state.touch("simulating mouse movement", video_id)
+            ensure_deadline_not_exceeded(video_deadline_ts, f"processing video {video_id}")
             simulate_mouse_movement(sb, logger)
 
             runtime_state.touch("simulating page scroll", video_id)
+            ensure_deadline_not_exceeded(video_deadline_ts, f"processing video {video_id}")
             simulate_page_scroll(sb, logger)
 
             reading_time = random.uniform(READING_TIME_MIN, READING_TIME_MAX)
+            reading_time = clamp_sleep_seconds(
+                reading_time,
+                video_deadline_ts,
+                f"processing video {video_id}",
+            )
             runtime_state.touch("simulating reading", video_id)
             logger.info("Simulating reading (%.1fs)...", reading_time)
             sb.sleep(reading_time)
@@ -1821,6 +2007,7 @@ def download_video(
             config,
             video_id,
             download_session=download_session,
+            deadline_ts=video_deadline_ts,
         )
 
         result["success"] = True
@@ -1831,6 +2018,7 @@ def download_video(
 
     except Exception as exc:
         result["error"] = str(exc)
+        result["timeout_like"] = is_timeout_like_message(exc)
         logger.error("Error downloading %s: %s", video_id, exc)
 
     return result
@@ -2306,9 +2494,12 @@ def main():
 
     fatal_error = None
     exit_code = 0
+    controlled_restart_requested = False
+    controlled_restart_reason = None
     login_email = None
     login_password = None
     download_session = build_download_http_session(config)
+    consecutive_timeout_failures = 0
 
     sb_kwargs = build_sb_kwargs(config, logger)
     logger.info("SeleniumBase args: %s", sb_kwargs)
@@ -2428,6 +2619,16 @@ def main():
                                 failed_videos,
                                 current_video_id=video_id,
                                 current_stage="already downloaded",
+                            )
+                            consecutive_timeout_failures = 0
+                            maybe_raise_controlled_restart(
+                                config,
+                                start_index,
+                                i,
+                                len(urls),
+                                consecutive_timeout_failures,
+                                logger,
+                                video_id,
                             )
                             if i < len(urls):
                                 delay = random.uniform(
@@ -2580,6 +2781,16 @@ def main():
                                 current_video_id=video_id,
                                 current_stage="skipped",
                             )
+                            consecutive_timeout_failures = 0
+                            maybe_raise_controlled_restart(
+                                config,
+                                start_index,
+                                i,
+                                len(urls),
+                                consecutive_timeout_failures,
+                                logger,
+                                video_id,
+                            )
                             if i < len(urls):
                                 delay = random.uniform(
                                     MIN_DELAY_BETWEEN_VIDEOS,
@@ -2638,6 +2849,16 @@ def main():
                                 failed_videos,
                                 current_video_id=video_id,
                                 current_stage="404 skip",
+                            )
+                            consecutive_timeout_failures = 0
+                            maybe_raise_controlled_restart(
+                                config,
+                                start_index,
+                                i,
+                                len(urls),
+                                consecutive_timeout_failures,
+                                logger,
+                                video_id,
                             )
                             if i < len(urls):
                                 delay = random.uniform(
@@ -2706,6 +2927,16 @@ def main():
                                 current_video_id=video_id,
                                 current_stage="privacy skip",
                             )
+                            consecutive_timeout_failures = 0
+                            maybe_raise_controlled_restart(
+                                config,
+                                start_index,
+                                i,
+                                len(urls),
+                                consecutive_timeout_failures,
+                                logger,
+                                video_id,
+                            )
                             if i < len(urls):
                                 delay = random.uniform(
                                     MIN_DELAY_BETWEEN_VIDEOS,
@@ -2732,6 +2963,7 @@ def main():
                             )
 
                         retry_attempts = int(config["settings"]["retry_attempts"])
+                        video_deadline_ts = build_video_deadline(config["settings"])
                         result = None
                         for attempt in range(1, retry_attempts + 1):
                             runtime_state.touch(f"download attempt {attempt}", video_id)
@@ -2748,13 +2980,31 @@ def main():
                                 login_email=login_email,
                                 login_password=login_password,
                                 cloudflare_retry_count=attempt - 1,
+                                video_deadline_ts=video_deadline_ts,
                             )
                             if result["success"]:
                                 break
                             if result.get("skipped_by_policy"):
                                 break
                             if attempt < retry_attempts:
+                                remaining_retry_budget = remaining_deadline_seconds(video_deadline_ts)
+                                if remaining_retry_budget is not None and remaining_retry_budget <= 0:
+                                    logger.warning(
+                                        "Overall video timeout budget exhausted for %s after attempt %d/%d",
+                                        video_id,
+                                        attempt,
+                                        retry_attempts,
+                                    )
+                                    break
                                 retry_delay = compute_retry_delay(config["settings"], attempt)
+                                if remaining_retry_budget is not None:
+                                    retry_delay = min(retry_delay, max(0.0, remaining_retry_budget))
+                                if retry_delay <= 0:
+                                    logger.warning(
+                                        "Skipping retry delay for %s because no overall video time budget remains",
+                                        video_id,
+                                    )
+                                    break
                                 logger.warning(
                                     "Attempt %d/%d failed for %s: %s. Retrying in %.1fs",
                                     attempt,
@@ -2826,6 +3076,7 @@ def main():
                                 len(urls),
                                 successful_downloads,
                             )
+                            consecutive_timeout_failures = 0
                         elif result and result.get("skipped_by_policy"):
                             skipped_videos += 1
                             reason = (
@@ -2889,6 +3140,7 @@ def main():
                                 current_video_id=video_id,
                                 current_stage="non-original skip",
                             )
+                            consecutive_timeout_failures = 0
                         else:
                             failed_videos += 1
                             error_message = result["error"] if result else "Unknown error"
@@ -2960,6 +3212,12 @@ def main():
                                 len(urls),
                                 stage="download",
                             )
+                            if result and result.get("timeout_like"):
+                                consecutive_timeout_failures += 1
+                            elif is_timeout_like_message(error_message):
+                                consecutive_timeout_failures += 1
+                            else:
+                                consecutive_timeout_failures = 0
 
                         telegram.notify_progress(
                             i,
@@ -2969,6 +3227,15 @@ def main():
                             failed_videos,
                             current_video_id=video_id,
                             current_stage=runtime_state.snapshot()["current_stage"],
+                        )
+                        maybe_raise_controlled_restart(
+                            config,
+                            start_index,
+                            i,
+                            len(urls),
+                            consecutive_timeout_failures,
+                            logger,
+                            video_id,
                         )
 
                         if i < len(urls):
@@ -3042,9 +3309,27 @@ def main():
                             len(urls),
                             stage="api_check",
                         )
+                        if is_timeout_like_message(exc):
+                            consecutive_timeout_failures += 1
+                        else:
+                            consecutive_timeout_failures = 0
+                        maybe_raise_controlled_restart(
+                            config,
+                            start_index,
+                            i,
+                            len(urls),
+                            consecutive_timeout_failures,
+                            logger,
+                            video_id,
+                        )
                     finally:
                         close_response_quietly(response)
 
+    except ControlledWorkerRestart as exc:
+        controlled_restart_requested = True
+        controlled_restart_reason = str(exc)
+        exit_code = CONTROLLED_RESTART_EXIT_CODE
+        logger.warning("Worker requested controlled restart: %s", exc)
     except Exception as exc:
         fatal_error = str(exc)
         exit_code = 1
@@ -3106,6 +3391,8 @@ def main():
         "failed_urls": len(failed_urls),
         "exit_code": exit_code,
         "fatal_error": fatal_error,
+        "restart_requested": controlled_restart_requested,
+        "restart_reason": controlled_restart_reason,
         "log_file": config["files"]["log_file"],
         "videos_dir": config["files"]["videos_dir"],
         "jsons_dir": config["files"]["jsons_dir"],
