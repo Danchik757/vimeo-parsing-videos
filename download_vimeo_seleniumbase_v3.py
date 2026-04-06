@@ -8,6 +8,7 @@ import os
 import platform
 import random
 import re
+import signal
 import shutil
 import subprocess
 import threading
@@ -101,6 +102,11 @@ def load_config(config_path):
     settings.setdefault("login_retry_attempts", 3)
     settings.setdefault("login_retry_delay_seconds", 10)
     settings.setdefault("page_load_timeout_seconds", 120)
+    settings.setdefault(
+        "page_open_stage_timeout_seconds",
+        max(180, int(settings.get("page_load_timeout_seconds", 120) or 120) + 60),
+    )
+    settings.setdefault("cloudflare_stage_timeout_seconds", 180)
 
     login_cfg = config.setdefault("vimeo_login", {})
     login_cfg.setdefault("email", "")
@@ -132,6 +138,14 @@ def load_config(config_path):
     watchdog.setdefault("stall_alert_after_seconds", 1800)
     watchdog.setdefault("repeat_alert_every_seconds", 1800)
     watchdog.setdefault("heartbeat_every_seconds", 900)
+    watchdog.setdefault("exit_on_stall", True)
+    watchdog.setdefault(
+        "stall_exit_after_seconds",
+        max(
+            int(watchdog.get("stall_alert_after_seconds", 1800) or 1800) * 2,
+            3600,
+        ),
+    )
 
     resume = config.setdefault("resume", {})
     resume.setdefault("enabled", True)
@@ -285,6 +299,8 @@ class ActivityWatchdog(threading.Thread):
         self.stall_after = int(watchdog_cfg.get("stall_alert_after_seconds", 1800))
         self.repeat_every = int(watchdog_cfg.get("repeat_alert_every_seconds", 1800))
         self.heartbeat_every = int(watchdog_cfg.get("heartbeat_every_seconds", 900))
+        self.exit_on_stall = bool(watchdog_cfg.get("exit_on_stall", True))
+        self.stall_exit_after = int(watchdog_cfg.get("stall_exit_after_seconds", 3600))
         self.stop_event = threading.Event()
 
     def stop(self):
@@ -341,6 +357,52 @@ class ActivityWatchdog(threading.Thread):
                 snapshot["failed"],
             )
             self.runtime_state.mark_stall_alert()
+
+            if self.exit_on_stall and self.stall_exit_after > 0 and idle_for >= self.stall_exit_after:
+                self.logger.error(
+                    "Watchdog terminating worker after %.0fs idle at stage '%s' (video=%s)",
+                    idle_for,
+                    snapshot["current_stage"],
+                    snapshot["current_video_id"],
+                )
+                self.telegram.notify_custom(
+                    "stall recovery",
+                    [
+                        f"video_id: <code>{snapshot['current_video_id'] or 'unknown'}</code>",
+                        f"stage: <code>{snapshot['current_stage'] or 'unknown'}</code>",
+                        f"idle_seconds: <code>{int(idle_for)}</code>",
+                        "action: <code>terminating worker for queue retry</code>",
+                    ],
+                )
+                os._exit(1)
+
+
+class StageTimeoutError(TimeoutError):
+    """Raised when a browser interaction exceeds its hard timeout."""
+
+
+def call_with_stage_timeout(timeout_seconds, description, func, *args, **kwargs):
+    timeout_seconds = int(timeout_seconds or 0)
+    if (
+        timeout_seconds <= 0
+        or threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "SIGALRM")
+        or not hasattr(signal, "setitimer")
+        or platform.system().lower() == "windows"
+    ):
+        return func(*args, **kwargs)
+
+    def _handle_timeout(_signum, _frame):
+        raise StageTimeoutError(f"{description} exceeded {timeout_seconds}s")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    try:
+        signal.signal(signal.SIGALRM, _handle_timeout)
+        signal.setitimer(signal.ITIMER_REAL, float(timeout_seconds))
+        return func(*args, **kwargs)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def simulate_mouse_movement(sb, logger):
@@ -1435,6 +1497,15 @@ def download_video(
         api_download = extract_best_api_download(json_data)
         result["api_best_option"] = normalize_download_option(api_download)
         runtime_state.touch("checking direct api download", video_id)
+        page_open_stage_timeout = int(
+            config["settings"].get(
+                "page_open_stage_timeout_seconds",
+                config["settings"].get("page_load_timeout_seconds", 120),
+            )
+        )
+        cloudflare_stage_timeout = int(
+            config["settings"].get("cloudflare_stage_timeout_seconds", 180)
+        )
         download_only_original = bool(config["settings"].get("download_only_original", False))
         api_selected_quality = None
         api_is_original = None
@@ -1475,7 +1546,12 @@ def download_video(
         else:
             runtime_state.touch("opening video page", video_id)
             logger.info("Opening %s", video_url)
-            sb.open(video_url)
+            call_with_stage_timeout(
+                page_open_stage_timeout,
+                f"opening video page for {video_id}",
+                sb.open,
+                video_url,
+            )
             result["page_visited"] = True
 
             initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
@@ -1507,7 +1583,13 @@ def download_video(
                 runtime_state.touch("re-authenticating session", video_id)
                 login_to_vimeo(sb, login_email, login_password, logger, config)
                 result["session_relogin"] = True
-                sb.open(video_url)
+                runtime_state.touch("opening video page", video_id)
+                call_with_stage_timeout(
+                    page_open_stage_timeout,
+                    f"re-opening video page for {video_id} after login",
+                    sb.open,
+                    video_url,
+                )
 
                 initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
                 logger.info("Waiting %.1fs for page reload after login...", initial_wait)
@@ -1538,9 +1620,16 @@ def download_video(
                     "Cloudflare detected, waiting %.0fs for auto-bypass...",
                     cloudflare_timeout,
                 )
-                sb.sleep(cloudflare_timeout)
 
-                if check_if_cloudflare_blocked(sb, logger):
+                def _wait_and_recheck_cloudflare():
+                    sb.sleep(cloudflare_timeout)
+                    return check_if_cloudflare_blocked(sb, logger)
+
+                if call_with_stage_timeout(
+                    cloudflare_stage_timeout,
+                    f"cloudflare auto-bypass stage for {video_id}",
+                    _wait_and_recheck_cloudflare,
+                ):
                     result["error"] = (
                         f"Cloudflare Turnstile not bypassed after "
                         f"{cloudflare_timeout:.0f}s"
