@@ -2521,6 +2521,8 @@ def main():
                     try:
                         sb.driver.set_page_load_timeout(page_load_timeout)
                         logger.info("Browser page load timeout set to %ds", page_load_timeout)
+                    except ControlledWorkerRestart:
+                        raise
                     except Exception as exc:
                         logger.warning("Failed to set page load timeout: %s", exc)
                 if bool(config["runtime"].get("vimeo_authenticated_session", False)):
