@@ -544,6 +544,9 @@ def check_config_and_paths(config, args, reporter):
 def check_interfaces_and_network(config, reporter):
     reporter.section("Network")
 
+    telegram_cfg = config.get("telegram", {})
+    source_address = str(telegram_cfg.get("source_address", "")).strip()
+
     for hostname, _, label in TCP_TARGETS:
         ok, detail = check_dns(hostname)
         if ok:
@@ -555,11 +558,17 @@ def check_interfaces_and_network(config, reporter):
         ok, detail = tcp_connect(hostname, port, timeout=5)
         if ok:
             reporter.pass_(f"TCP {label}", detail)
+        elif hostname == "api.telegram.org" and source_address:
+            reporter.warn(
+                f"TCP {label}",
+                (
+                    f"default-route check failed ({detail}); "
+                    f"source-bound Telegram path is used instead via {source_address}"
+                ),
+            )
         else:
             reporter.fail(f"TCP {label}", detail)
 
-    telegram_cfg = config.get("telegram", {})
-    source_address = str(telegram_cfg.get("source_address", "")).strip()
     if source_address:
         iface = get_interface_for_source_ip(source_address)
         if iface:
