@@ -26,7 +26,7 @@
 
 На сервере рядом с профилем должен лежать:
 
-- `config.parse-3.secrets.local.json`
+- `config.parse-3.secrets.json`
 
 ## WG для parse-3
 
