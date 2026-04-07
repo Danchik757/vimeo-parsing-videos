@@ -4,20 +4,22 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import platform
 import random
 import re
+import signal
 import shutil
 import subprocess
 import threading
 import time
-from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
 import vimeo
+from requests.adapters import HTTPAdapter
 from seleniumbase import SB
 from selenium.webdriver.common.action_chains import ActionChains
 
@@ -45,6 +47,9 @@ READING_TIME_MIN = 1
 READING_TIME_MAX = 3
 CLOUDFLARE_TIMEOUT_MIN = 40
 CLOUDFLARE_TIMEOUT_MAX = 60
+CONTROLLED_RESTART_EXIT_CODE = 75
+
+
 def load_config(config_path):
     config, config_path, config_dir, secrets_path = load_json_config_with_optional_secrets(config_path)
     config["_meta"] = {
@@ -84,6 +89,9 @@ def load_config(config_path):
     settings.setdefault("test_limit", 50)
     settings.setdefault("retry_attempts", 3)
     settings.setdefault("retry_delay", 5)
+    settings.setdefault("retry_backoff_multiplier", 2.0)
+    settings.setdefault("retry_backoff_max_delay_seconds", 60)
+    settings.setdefault("retry_jitter_seconds", 2)
     settings.setdefault("javascript_wait_time", 15)
     settings.setdefault("download_timeout", 600)
     settings.setdefault("connect_timeout", 30)
@@ -93,7 +101,6 @@ def load_config(config_path):
     settings.setdefault("store_full_api_payload_for_downloaded", True)
     settings.setdefault("download_interface", "")
     settings.setdefault("download_retry_interface", "")
-    settings.setdefault("api_401_fallback_to_page", False)
     settings.setdefault(
         "direct_download_timeout_seconds",
         int(settings.get("download_timeout", 600)),
@@ -105,6 +112,15 @@ def load_config(config_path):
     settings.setdefault("login_completion_timeout_seconds", 30)
     settings.setdefault("login_retry_attempts", 3)
     settings.setdefault("login_retry_delay_seconds", 10)
+    settings.setdefault("page_load_timeout_seconds", 120)
+    settings.setdefault(
+        "page_open_stage_timeout_seconds",
+        max(180, int(settings.get("page_load_timeout_seconds", 120) or 120) + 60),
+    )
+    settings.setdefault("cloudflare_stage_timeout_seconds", 180)
+    settings.setdefault("video_processing_timeout_seconds", 1200)
+    settings.setdefault("download_http_pool_connections", 2)
+    settings.setdefault("download_http_pool_maxsize", 4)
 
     login_cfg = config.setdefault("vimeo_login", {})
     login_cfg.setdefault("email", "")
@@ -136,6 +152,14 @@ def load_config(config_path):
     watchdog.setdefault("stall_alert_after_seconds", 1800)
     watchdog.setdefault("repeat_alert_every_seconds", 1800)
     watchdog.setdefault("heartbeat_every_seconds", 900)
+    watchdog.setdefault("exit_on_stall", True)
+    watchdog.setdefault(
+        "stall_exit_after_seconds",
+        max(
+            int(watchdog.get("stall_alert_after_seconds", 1800) or 1800) * 2,
+            3600,
+        ),
+    )
 
     resume = config.setdefault("resume", {})
     resume.setdefault("enabled", True)
@@ -150,6 +174,13 @@ def load_config(config_path):
     workers.setdefault("count", 1)
     workers.setdefault("stagger_start_seconds", 3)
     workers.setdefault("shared_media_dirs", False)
+    workers.setdefault("socket_pressure_gate_enabled", True)
+    workers.setdefault("max_tcp_inuse_to_start_worker", 320)
+    workers.setdefault("max_tcp_timewait_to_start_worker", 500)
+    workers.setdefault("max_tcp_orphan_to_start_worker", 130)
+    workers.setdefault("socket_pressure_cooldown_seconds", 60)
+    workers.setdefault("restart_after_processed", 400)
+    workers.setdefault("consecutive_timeout_failures_before_restart", 3)
 
     batches = config.setdefault("batches", {})
     batches.setdefault("enabled", False)
@@ -289,6 +320,8 @@ class ActivityWatchdog(threading.Thread):
         self.stall_after = int(watchdog_cfg.get("stall_alert_after_seconds", 1800))
         self.repeat_every = int(watchdog_cfg.get("repeat_alert_every_seconds", 1800))
         self.heartbeat_every = int(watchdog_cfg.get("heartbeat_every_seconds", 900))
+        self.exit_on_stall = bool(watchdog_cfg.get("exit_on_stall", True))
+        self.stall_exit_after = int(watchdog_cfg.get("stall_exit_after_seconds", 3600))
         self.stop_event = threading.Event()
 
     def stop(self):
@@ -345,6 +378,170 @@ class ActivityWatchdog(threading.Thread):
                 snapshot["failed"],
             )
             self.runtime_state.mark_stall_alert()
+
+            if self.exit_on_stall and self.stall_exit_after > 0 and idle_for >= self.stall_exit_after:
+                self.logger.error(
+                    "Watchdog terminating worker after %.0fs idle at stage '%s' (video=%s)",
+                    idle_for,
+                    snapshot["current_stage"],
+                    snapshot["current_video_id"],
+                )
+                self.telegram.notify_custom(
+                    "stall recovery",
+                    [
+                        f"video_id: <code>{snapshot['current_video_id'] or 'unknown'}</code>",
+                        f"stage: <code>{snapshot['current_stage'] or 'unknown'}</code>",
+                        f"idle_seconds: <code>{int(idle_for)}</code>",
+                        "action: <code>terminating worker for queue retry</code>",
+                    ],
+                )
+                os._exit(CONTROLLED_RESTART_EXIT_CODE)
+
+
+class StageTimeoutError(TimeoutError):
+    """Raised when a browser interaction exceeds its hard timeout."""
+
+
+class ControlledWorkerRestart(RuntimeError):
+    """Raised when a worker should exit cleanly and resume in a fresh process."""
+
+
+def call_with_stage_timeout(timeout_seconds, description, func, *args, **kwargs):
+    timeout_seconds = int(timeout_seconds or 0)
+    if (
+        timeout_seconds <= 0
+        or threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "SIGALRM")
+        or not hasattr(signal, "setitimer")
+        or platform.system().lower() == "windows"
+    ):
+        return func(*args, **kwargs)
+
+    def _handle_timeout(_signum, _frame):
+        raise StageTimeoutError(f"{description} exceeded {timeout_seconds}s")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    try:
+        signal.signal(signal.SIGALRM, _handle_timeout)
+        signal.setitimer(signal.ITIMER_REAL, float(timeout_seconds))
+        return func(*args, **kwargs)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def build_video_deadline(settings):
+    timeout_seconds = int(settings.get("video_processing_timeout_seconds", 0) or 0)
+    if timeout_seconds <= 0:
+        return None
+    return time.monotonic() + timeout_seconds
+
+
+def remaining_deadline_seconds(deadline_ts):
+    if deadline_ts is None:
+        return None
+    return deadline_ts - time.monotonic()
+
+
+def ensure_deadline_not_exceeded(deadline_ts, description):
+    remaining = remaining_deadline_seconds(deadline_ts)
+    if remaining is None:
+        return
+    if remaining <= 0:
+        raise StageTimeoutError(f"{description} exceeded overall video timeout")
+
+
+def resolve_stage_timeout(timeout_seconds, deadline_ts):
+    timeout_seconds = int(timeout_seconds or 0)
+    if timeout_seconds <= 0 or deadline_ts is None:
+        return timeout_seconds
+    remaining = remaining_deadline_seconds(deadline_ts)
+    if remaining is None:
+        return timeout_seconds
+    return max(1, min(timeout_seconds, int(math.ceil(remaining))))
+
+
+def clamp_sleep_seconds(seconds, deadline_ts, description):
+    seconds = float(seconds or 0)
+    if deadline_ts is None:
+        return seconds
+    remaining = remaining_deadline_seconds(deadline_ts)
+    if remaining is None or remaining <= 0:
+        raise StageTimeoutError(f"{description} exceeded overall video timeout")
+    return min(seconds, remaining)
+
+
+def terminate_subprocess_quietly(process, timeout_seconds=5):
+    try:
+        process.terminate()
+    except Exception:
+        return
+
+    deadline = time.time() + max(1, int(timeout_seconds))
+    while time.time() < deadline:
+        if process.poll() is not None:
+            return
+        time.sleep(0.2)
+
+    try:
+        process.kill()
+    except Exception:
+        pass
+
+
+def is_timeout_like_message(message):
+    text = str(message or "").lower()
+    if not text:
+        return False
+    markers = (
+        "timed out",
+        "timeout",
+        "time-out",
+        "read timed out",
+        "connecttimeout",
+        "connection timed out",
+        "stall timeout",
+        "overall video timeout",
+    )
+    if any(marker in text for marker in markers):
+        return True
+    return re.search(r"\bexceeded\s+\d+s\b", text) is not None
+
+
+def maybe_raise_controlled_restart(
+    config,
+    start_index,
+    current_index,
+    total_urls,
+    consecutive_timeout_failures,
+    logger,
+    video_id,
+):
+    if current_index >= total_urls:
+        return
+
+    worker_cfg = config.get("workers", {})
+    restart_after_processed = int(worker_cfg.get("restart_after_processed", 0) or 0)
+    if restart_after_processed > 0:
+        processed_in_this_worker = max(0, int(current_index) - int(start_index))
+        if processed_in_this_worker >= restart_after_processed:
+            reason = (
+                f"processed {processed_in_this_worker} URLs in this worker process; "
+                f"restarting to refresh browser/network state at video {video_id}"
+            )
+            logger.warning("Controlled worker restart requested: %s", reason)
+            raise ControlledWorkerRestart(reason)
+
+    timeout_restart_threshold = int(
+        worker_cfg.get("consecutive_timeout_failures_before_restart", 0) or 0
+    )
+    if timeout_restart_threshold > 0 and consecutive_timeout_failures >= timeout_restart_threshold:
+        reason = (
+            f"{consecutive_timeout_failures} consecutive timeout-like failures; "
+            f"restarting worker before retrying at video {video_id}"
+        )
+        logger.warning("Controlled worker restart requested: %s", reason)
+        raise ControlledWorkerRestart(reason)
 
 
 def simulate_mouse_movement(sb, logger):
@@ -434,50 +631,17 @@ def save_login_failure_artifact(sb, logger, config, attempt):
         logger.warning("Failed to save login failure HTML: %s", exc)
 
 
-def wait_for_first_visible_selector(sb, selectors, timeout_seconds):
-    deadline = time.time() + max(1, int(timeout_seconds))
-    while time.time() < deadline:
-        for selector in selectors:
-            try:
-                sb.wait_for_element_visible(selector, timeout=1)
-                return selector
-            except Exception:
-                continue
-    return None
-
-
-def click_first_matching_selector(sb, selectors, logger, timeout=3):
-    for selector in selectors:
-        try:
-            sb.wait_for_element_present(selector, timeout=timeout)
-            sb.click(selector)
-            logger.info("Clicked login helper control via %s", selector)
-            return selector
-        except Exception:
-            continue
-    return None
-
-
 def login_to_vimeo(sb, email, password, logger, config):
     settings = config["settings"]
     login_completion_timeout = int(settings.get("login_completion_timeout_seconds", 30))
     login_retry_attempts = int(settings.get("login_retry_attempts", 3))
     login_retry_delay_seconds = int(settings.get("login_retry_delay_seconds", 10))
-    login_page_wait_seconds = max(12, int(settings.get("javascript_wait_time", 15)))
 
-    login_urls = [
-        "https://vimeo.com/log_in",
-        "https://vimeo.com/login",
-    ]
     email_selectors = [
         "#email_login",
         "input[data-testid='site_login_email_input']",
         "input[name='email']",
         "input[type='email']",
-        "input[autocomplete='username']",
-        "input[autocomplete='email']",
-        "input[id*='email']",
-        "input[placeholder*='email' i]",
         "#email",
     ]
     password_selectors = [
@@ -485,82 +649,39 @@ def login_to_vimeo(sb, email, password, logger, config):
         "input[data-testid='site_login_password_input']",
         "input[name='password']",
         "input[type='password']",
-        "input[autocomplete='current-password']",
-        "input[id*='password']",
-        "input[placeholder*='password' i]",
         "#password",
     ]
     submit_selectors = [
         "button[data-testid='site_login_submit_button']",
         "button[type='submit']",
         "button[aria-label*='Log in']",
-        "//button[contains(translate(., 'LOGIN', 'login'), 'log in')]",
-        "//button[contains(translate(., 'LOGIN', 'login'), 'login')]",
-    ]
-    continue_with_email_selectors = [
-        "button[data-testid='email-login-button']",
-        "//button[contains(translate(., 'EMAIL', 'email'), 'email')]",
-        "//a[contains(translate(., 'EMAIL', 'email'), 'email')]",
     ]
 
     for attempt in range(1, login_retry_attempts + 1):
         logger.info("Opening Vimeo login page (attempt %d/%d)", attempt, login_retry_attempts)
-        email_selector = None
-        for login_url in login_urls:
-            sb.open(login_url)
-            sb.sleep(3)
+        sb.open("https://vimeo.com/log_in")
+        sb.sleep(3)
 
-            if check_if_cloudflare_blocked(sb, logger):
-                logger.warning(
-                    "Cloudflare or interstitial detected on login page, waiting %ss before probing fields",
-                    login_page_wait_seconds,
-                )
-                sb.sleep(login_page_wait_seconds)
-
-            click_first_matching_selector(
-                sb,
-                continue_with_email_selectors,
-                logger,
-                timeout=2,
-            )
-            email_selector = wait_for_first_visible_selector(
-                sb,
-                email_selectors,
-                timeout_seconds=login_page_wait_seconds,
-            )
-            if email_selector:
+        for selector in email_selectors:
+            try:
+                sb.wait_for_element_visible(selector, timeout=10)
+                sb.clear(selector)
+                sb.type(selector, email)
                 break
-
-        if not email_selector:
-            current_url = ""
-            page_title = ""
-            try:
-                current_url = sb.get_current_url()
             except Exception:
-                pass
+                continue
+        else:
+            raise RuntimeError("Email input not found on Vimeo login page")
+
+        for selector in password_selectors:
             try:
-                page_title = sb.get_title()
+                sb.clear(selector)
+                sb.type(selector, password)
+                break
             except Exception:
-                pass
-            save_login_failure_artifact(sb, logger, config, attempt)
-            raise RuntimeError(
-                f"Email input not found on Vimeo login page (url={current_url or 'unknown'}, title={page_title or 'unknown'})"
-            )
-
-        sb.clear(email_selector)
-        sb.type(email_selector, email)
-
-        password_selector = wait_for_first_visible_selector(
-            sb,
-            password_selectors,
-            timeout_seconds=10,
-        )
-        if not password_selector:
-            save_login_failure_artifact(sb, logger, config, attempt)
+                continue
+        else:
             raise RuntimeError("Password input not found on Vimeo login page")
-
-        sb.clear(password_selector)
-        sb.type(password_selector, password)
 
         for selector in submit_selectors:
             try:
@@ -569,7 +690,6 @@ def login_to_vimeo(sb, email, password, logger, config):
             except Exception:
                 continue
         else:
-            save_login_failure_artifact(sb, logger, config, attempt)
             raise RuntimeError("Login submit button not found on Vimeo login page")
 
         logger.info(
@@ -626,12 +746,62 @@ def parse_content_range_total(header_value):
     return int(total_part)
 
 
-def extract_video_id(video_url):
-    parsed = urlparse(video_url)
+def coerce_numeric_video_id(value):
+    if value is None:
+        return None
+
+    candidate = str(value).strip()
+    if not candidate:
+        return None
+
+    parsed = urlparse(candidate)
     path = parsed.path.rstrip("/")
-    if not path:
-        return video_url.rstrip("/").split("/")[-1]
-    return path.split("/")[-1]
+    if path:
+        segments = [segment.strip() for segment in path.split("/") if segment.strip()]
+        for segment in reversed(segments):
+            if segment.isdigit():
+                return segment
+        if segments:
+            candidate = segments[-1]
+
+    return candidate if candidate.isdigit() else None
+
+
+def extract_video_identifier(value, field_name="video_id"):
+    if value is None:
+        raise ValueError(f"{field_name} is required")
+
+    candidate = str(value).strip()
+    if not candidate:
+        raise ValueError(f"{field_name} is required")
+
+    parsed = urlparse(candidate)
+    path = parsed.path.rstrip("/")
+    if path:
+        segments = [segment.strip() for segment in path.split("/") if segment.strip()]
+        if segments:
+            return segments[-1]
+
+    candidate = candidate.rstrip("/").split("/")[-1].strip()
+    if not candidate:
+        raise ValueError(f"{field_name} is required")
+    return candidate
+
+
+def normalize_video_storage_key(value, field_name="video_id"):
+    normalized_numeric = coerce_numeric_video_id(value)
+    if normalized_numeric is not None:
+        return normalized_numeric
+
+    identifier = extract_video_identifier(value, field_name=field_name)
+    safe_value = re.sub(r"[^A-Za-z0-9._-]+", "_", identifier).strip("._")
+    if not safe_value or safe_value in {".", ".."}:
+        raise ValueError(f"{field_name} must resolve to a safe storage key: {value!r}")
+    return safe_value
+
+
+def extract_video_id(video_url):
+    return extract_video_identifier(video_url, field_name="video_url")
 
 
 def current_network_label(config):
@@ -654,7 +824,66 @@ def is_probable_ip_block(error_message):
     return any(indicator in message for indicator in indicators)
 
 
-def download_file_via_curl(url, local_filename, runtime_state, logger, config, video_id, interface_name=None):
+def close_response_quietly(response):
+    if response is None:
+        return
+    close = getattr(response, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def close_session_quietly(session):
+    if session is None:
+        return
+    close = getattr(session, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def build_download_http_session(config):
+    settings = config["settings"]
+    pool_connections = max(1, int(settings.get("download_http_pool_connections", 2) or 2))
+    pool_maxsize = max(1, int(settings.get("download_http_pool_maxsize", 4) or 4))
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=pool_connections,
+        pool_maxsize=pool_maxsize,
+        max_retries=0,
+        pool_block=True,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def compute_retry_delay(settings, attempt_number):
+    base_delay = max(0.0, float(settings.get("retry_delay", 5) or 0))
+    multiplier = max(1.0, float(settings.get("retry_backoff_multiplier", 2.0) or 1.0))
+    max_delay = max(base_delay, float(settings.get("retry_backoff_max_delay_seconds", 60) or base_delay))
+    jitter = max(0.0, float(settings.get("retry_jitter_seconds", 2) or 0))
+    exponent = max(0, int(attempt_number) - 1)
+    delay = min(max_delay, base_delay * (multiplier ** exponent))
+    if jitter > 0:
+        delay += random.uniform(0.0, jitter)
+    return delay
+
+
+def download_file_via_curl(
+    url,
+    local_filename,
+    runtime_state,
+    logger,
+    config,
+    video_id,
+    interface_name=None,
+    deadline_ts=None,
+):
     settings = config["settings"]
     resume = config["resume"]
     connect_timeout = int(settings.get("connect_timeout", 30))
@@ -713,37 +942,48 @@ def download_file_via_curl(url, local_filename, runtime_state, logger, config, v
     cmd.append(url)
     logger.info("Downloading %s via curl on interface %s", video_id, download_interface)
 
-    process = subprocess.Popen(
+    stderr_output = ""
+    with subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
-    )
-
-    last_log_ts = time.time()
-    last_size = existing_size
-    while True:
-        return_code = process.poll()
-        current_size = part_path.stat().st_size if part_path.exists() else existing_size
-        runtime_state.touch("downloading file", video_id)
-
-        if time.time() - last_log_ts >= progress_log_every:
-            if current_size != last_size or current_size > 0:
-                logger.info(
-                    "Download progress for %s: %d MB",
-                    video_id,
-                    int(current_size / (1024 * 1024)),
+    ) as process:
+        last_log_ts = time.time()
+        last_size = existing_size
+        while True:
+            try:
+                ensure_deadline_not_exceeded(
+                    deadline_ts,
+                    f"downloading file for {video_id}",
                 )
-                last_size = current_size
-            last_log_ts = time.time()
+            except StageTimeoutError:
+                logger.warning(
+                    "Overall video timeout reached while curl was downloading %s; terminating curl process",
+                    video_id,
+                )
+                terminate_subprocess_quietly(process)
+                raise
+            return_code = process.poll()
+            current_size = part_path.stat().st_size if part_path.exists() else existing_size
+            runtime_state.touch("downloading file", video_id)
 
-        if return_code is not None:
-            break
-        time.sleep(1)
+            if time.time() - last_log_ts >= progress_log_every:
+                if current_size != last_size or current_size > 0:
+                    logger.info(
+                        "Download progress for %s: %d MB",
+                        video_id,
+                        int(current_size / (1024 * 1024)),
+                    )
+                    last_size = current_size
+                last_log_ts = time.time()
 
-    stderr_output = ""
-    if process.stderr is not None:
-        stderr_output = process.stderr.read().strip()
+            if return_code is not None:
+                break
+            time.sleep(1)
+
+        if process.stderr is not None:
+            stderr_output = process.stderr.read().strip()
 
     if return_code != 0:
         error_message = stderr_output.splitlines()[-1] if stderr_output else f"curl exited with {return_code}"
@@ -758,7 +998,16 @@ def download_file_via_curl(url, local_filename, runtime_state, logger, config, v
     return file_size_mb
 
 
-def download_file(url, local_filename, runtime_state, logger, config, video_id):
+def download_file(
+    url,
+    local_filename,
+    runtime_state,
+    logger,
+    config,
+    video_id,
+    download_session=None,
+    deadline_ts=None,
+):
     settings = config["settings"]
     resume = config["resume"]
     download_interface = (settings.get("download_interface") or "").strip()
@@ -773,6 +1022,7 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id):
             config,
             video_id,
             interface_name=download_interface,
+            deadline_ts=deadline_ts,
         )
 
     chunk_size = int(settings.get("download_chunk_size_kb", 1024)) * 1024
@@ -812,7 +1062,9 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id):
 
     try:
         while True:
-            with requests.get(
+            ensure_deadline_not_exceeded(deadline_ts, f"downloading file for {video_id}")
+            request_fn = download_session.get if download_session is not None else requests.get
+            with request_fn(
                 url,
                 stream=True,
                 timeout=(connect_timeout, read_timeout),
@@ -865,6 +1117,7 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id):
 
                 with open(part_path, write_mode) as f:
                     for chunk in response.iter_content(chunk_size=chunk_size):
+                        ensure_deadline_not_exceeded(deadline_ts, f"downloading file for {video_id}")
                         if not chunk:
                             continue
                         f.write(chunk)
@@ -905,6 +1158,7 @@ def download_file(url, local_filename, runtime_state, logger, config, video_id):
                 config,
                 video_id,
                 interface_name=download_retry_interface,
+                deadline_ts=deadline_ts,
             )
         raise
 
@@ -987,7 +1241,8 @@ def load_existing_download_metadata(metadata_path, config=None, logger=None):
 
 
 def get_video_storage_dir(video_dir, video_id):
-    return Path(video_dir) / "downloaded" / str(video_id)
+    normalized_video_id = normalize_video_storage_key(video_id)
+    return Path(video_dir) / "downloaded" / normalized_video_id
 
 
 def get_metadata_bucket(status, result=None):
@@ -1004,11 +1259,12 @@ def get_download_status_root(video_dir, status, result=None):
 
 
 def get_video_metadata_path(video_dir, video_id, status="downloaded", result=None):
+    normalized_video_id = normalize_video_storage_key(video_id)
     bucket = get_metadata_bucket(status, result=result)
     if bucket == "downloaded":
-        storage_dir = Path(video_dir) / bucket / str(video_id)
-        return storage_dir / f"{video_id}.json"
-    return Path(video_dir) / bucket / f"{video_id}.json"
+        storage_dir = Path(video_dir) / bucket / normalized_video_id
+        return storage_dir / f"{normalized_video_id}.json"
+    return Path(video_dir) / bucket / f"{normalized_video_id}.json"
 
 
 def extract_canonical_video_id(video_id, json_data=None, result=None):
@@ -1039,13 +1295,11 @@ def extract_canonical_video_id(video_id, json_data=None, result=None):
         )
 
     for candidate in candidates:
-        if candidate is None:
-            continue
-        candidate = str(candidate).strip()
-        if candidate.isdigit():
-            return candidate
+        normalized = coerce_numeric_video_id(candidate)
+        if normalized is not None:
+            return normalized
 
-    return str(video_id)
+    return normalize_video_storage_key(video_id)
 
 
 def normalize_download_option(option):
@@ -1126,6 +1380,19 @@ def collect_modal_download_options(sb, timeout=12):
     if modal_seen:
         return last_options
     return []
+
+
+def probe_player_iframe_download(sb, video_id, logger, timeout):
+    click_download_button_in_player_iframe(sb, timeout=timeout, logger=logger)
+    best_option = extract_best_player_iframe_download(
+        sb, timeout=timeout, logger=logger
+    )
+    if logger and best_option:
+        logger.info(
+            "Recovered download link for %s from Vimeo player iframe fallback",
+            video_id,
+        )
+    return best_option
 
 
 def extract_script_json_by_id(page_source, script_id):
@@ -1408,19 +1675,6 @@ def save_video_metadata(
     return metadata_path
 
 
-def probe_player_iframe_download(sb, video_id, logger, timeout):
-    click_download_button_in_player_iframe(sb, timeout=timeout, logger=logger)
-    best_option = extract_best_player_iframe_download(
-        sb, timeout=timeout, logger=logger
-    )
-    if logger and best_option:
-        logger.info(
-            "Recovered download link for %s from Vimeo player iframe fallback",
-            video_id,
-        )
-    return best_option
-
-
 def download_video(
     sb,
     video_url,
@@ -1430,10 +1684,11 @@ def download_video(
     logger,
     config,
     runtime_state,
+    download_session=None,
     login_email=None,
     login_password=None,
     cloudflare_retry_count=0,
-    cached_download=None,
+    video_deadline_ts=None,
 ):
     result = {
         "success": False,
@@ -1464,74 +1719,123 @@ def download_video(
         "authenticated_session": bool(config["runtime"].get("vimeo_authenticated_session", False)),
         "canonical_video_id": None,
         "file_path": None,
+        "timeout_like": False,
     }
 
     try:
+        if video_deadline_ts is None:
+            video_deadline_ts = build_video_deadline(config["settings"])
+        ensure_deadline_not_exceeded(video_deadline_ts, f"processing video {video_id}")
+        api_download = extract_best_api_download(json_data)
+        result["api_best_option"] = normalize_download_option(api_download)
         runtime_state.touch("checking direct api download", video_id)
-        download_only_original = bool(config["settings"].get("download_only_original", False))
-        download_link = None
-        api_non_original_fallback = False
-
-        cached_download_link = str((cached_download or {}).get("download_link") or "").strip()
-        if cached_download_link:
-            result["download_source"] = (cached_download or {}).get("download_source") or "cached"
-            result["selected_quality"] = (cached_download or {}).get("selected_quality")
-            result["is_original"] = (cached_download or {}).get("is_original")
-            result["download_link"] = cached_download_link
-            result["download_link_found"] = True
-            result["downloadable"] = bool((cached_download or {}).get("downloadable", True))
-            result["button_found"] = (cached_download or {}).get("button_found")
-            download_link = cached_download_link
-            logger.info("Reusing cached download link for %s from previous attempt", video_id)
-        else:
-            api_download = extract_best_api_download(json_data)
-            result["api_best_option"] = normalize_download_option(api_download)
-            api_selected_quality = None
-            api_is_original = None
-            if api_download:
-                api_selected_quality = (
-                    api_download.get("text")
-                    or api_download.get("quality")
-                    or api_download.get("rendition")
-                )
-                api_is_original = is_original_quality(api_selected_quality, config=config)
-
-            api_non_original_fallback = bool(
-                api_download and download_only_original and api_is_original is not True
+        page_open_stage_timeout = int(
+            config["settings"].get(
+                "page_open_stage_timeout_seconds",
+                config["settings"].get("page_load_timeout_seconds", 120),
             )
-            if api_download:
-                result["download_source"] = "api"
-                result["selected_quality"] = api_selected_quality
-                result["is_original"] = api_is_original
-                result["download_link"] = api_download.get("href")
-                result["download_link_found"] = bool(api_download.get("href"))
-                result["downloadable"] = True
-                if api_non_original_fallback:
-                    result["policy_reason"] = "downloadable via api but best available option is not original"
+        )
+        cloudflare_stage_timeout = int(
+            config["settings"].get("cloudflare_stage_timeout_seconds", 180)
+        )
+        download_only_original = bool(config["settings"].get("download_only_original", False))
+        api_selected_quality = None
+        api_is_original = None
+        if api_download:
+            api_selected_quality = (
+                api_download.get("text")
+                or api_download.get("quality")
+                or api_download.get("rendition")
+            )
+            api_is_original = is_original_quality(api_selected_quality, config=config)
 
-            use_api_download = bool(api_download)
-            if download_only_original and not api_is_original:
-                use_api_download = False
+        api_non_original_fallback = bool(
+            api_download and download_only_original and api_is_original is not True
+        )
+        if api_download:
+            result["download_source"] = "api"
+            result["selected_quality"] = api_selected_quality
+            result["is_original"] = api_is_original
+            result["download_link"] = api_download.get("href")
+            result["download_link_found"] = bool(api_download.get("href"))
+            result["downloadable"] = True
+            if api_non_original_fallback:
+                result["policy_reason"] = "downloadable via api but best available option is not original"
 
-            if use_api_download:
-                download_link = api_download["href"]
-                logger.info(
-                    "Using direct API download link for %s (%s)",
-                    video_id,
-                    api_download.get("text")
-                    or api_download.get("quality")
-                    or "best available",
+        use_api_download = bool(api_download)
+        if download_only_original and not api_is_original:
+            use_api_download = False
+
+        if use_api_download:
+            download_link = api_download["href"]
+            logger.info(
+                "Using direct API download link for %s (%s)",
+                video_id,
+                api_download.get("text")
+                or api_download.get("quality")
+                or "best available",
+            )
+        else:
+            runtime_state.touch("opening video page", video_id)
+            logger.info("Opening %s", video_url)
+            call_with_stage_timeout(
+                resolve_stage_timeout(page_open_stage_timeout, video_deadline_ts),
+                f"opening video page for {video_id}",
+                sb.open,
+                video_url,
+            )
+            result["page_visited"] = True
+
+            initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
+            initial_wait = clamp_sleep_seconds(
+                initial_wait,
+                video_deadline_ts,
+                f"processing video {video_id}",
+            )
+            logger.info("Waiting %.1fs for page load...", initial_wait)
+            sb.sleep(initial_wait)
+
+            try:
+                result["page_url"] = sb.get_current_url()
+            except Exception:
+                result["page_url"] = video_url
+            try:
+                result["page_title"] = sb.get_title()
+            except Exception:
+                result["page_title"] = None
+            try:
+                result["page_context"] = extract_page_context_summary(sb.get_page_source())
+            except Exception:
+                result["page_context"] = None
+
+            if bool(config["runtime"].get("vimeo_authenticated_session", False)) and is_login_page(
+                result.get("page_url"),
+                result.get("page_title"),
+                result.get("page_context"),
+            ):
+                logger.warning(
+                    "Session appears logged out while opening %s; re-authenticating",
+                    video_url,
                 )
-            else:
+                runtime_state.touch("re-authenticating session", video_id)
+                login_to_vimeo(sb, login_email, login_password, logger, config)
+                result["session_relogin"] = True
                 runtime_state.touch("opening video page", video_id)
-                logger.info("Opening %s", video_url)
-                sb.open(video_url)
-                result["page_visited"] = True
+                call_with_stage_timeout(
+                    resolve_stage_timeout(page_open_stage_timeout, video_deadline_ts),
+                    f"re-opening video page for {video_id} after login",
+                    sb.open,
+                    video_url,
+                )
 
                 initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
-                logger.info("Waiting %.1fs for page load...", initial_wait)
+                initial_wait = clamp_sleep_seconds(
+                    initial_wait,
+                    video_deadline_ts,
+                    f"processing video {video_id}",
+                )
+                logger.info("Waiting %.1fs for page reload after login...", initial_wait)
                 sb.sleep(initial_wait)
-
                 try:
                     result["page_url"] = sb.get_current_url()
                 except Exception:
@@ -1545,92 +1849,172 @@ def download_video(
                 except Exception:
                     result["page_context"] = None
 
-                if bool(config["runtime"].get("vimeo_authenticated_session", False)) and is_login_page(
-                    result.get("page_url"),
-                    result.get("page_title"),
-                    result.get("page_context"),
-                ):
-                    logger.warning(
-                        "Session appears logged out while opening %s; re-authenticating",
-                        video_url,
-                    )
-                    runtime_state.touch("re-authenticating session", video_id)
-                    login_to_vimeo(sb, login_email, login_password, logger, config)
-                    result["session_relogin"] = True
-                    sb.open(video_url)
+            if check_if_cloudflare_blocked(sb, logger):
+                result["cloudflare_detected"] = True
+                cloudflare_timeout = random.uniform(
+                    CLOUDFLARE_TIMEOUT_MIN,
+                    CLOUDFLARE_TIMEOUT_MAX,
+                )
+                cloudflare_timeout += cloudflare_retry_count * 10
+                cloudflare_timeout = clamp_sleep_seconds(
+                    cloudflare_timeout,
+                    video_deadline_ts,
+                    f"processing video {video_id}",
+                )
 
-                    initial_wait = random.uniform(PAGE_LOAD_WAIT_MIN, PAGE_LOAD_WAIT_MAX)
-                    logger.info("Waiting %.1fs for page reload after login...", initial_wait)
-                    sb.sleep(initial_wait)
-                    try:
-                        result["page_url"] = sb.get_current_url()
-                    except Exception:
-                        result["page_url"] = video_url
-                    try:
-                        result["page_title"] = sb.get_title()
-                    except Exception:
-                        result["page_title"] = None
-                    try:
-                        result["page_context"] = extract_page_context_summary(sb.get_page_source())
-                    except Exception:
-                        result["page_context"] = None
+                runtime_state.touch("waiting cloudflare auto-bypass", video_id)
+                logger.warning(
+                    "Cloudflare detected, waiting %.0fs for auto-bypass...",
+                    cloudflare_timeout,
+                )
 
-                if check_if_cloudflare_blocked(sb, logger):
-                    result["cloudflare_detected"] = True
-                    cloudflare_timeout = random.uniform(
-                        CLOUDFLARE_TIMEOUT_MIN,
-                        CLOUDFLARE_TIMEOUT_MAX,
-                    )
-                    cloudflare_timeout += cloudflare_retry_count * 10
-
-                    runtime_state.touch("waiting cloudflare auto-bypass", video_id)
-                    logger.warning(
-                        "Cloudflare detected, waiting %.0fs for auto-bypass...",
-                        cloudflare_timeout,
-                    )
+                def _wait_and_recheck_cloudflare():
                     sb.sleep(cloudflare_timeout)
+                    return check_if_cloudflare_blocked(sb, logger)
 
-                    if check_if_cloudflare_blocked(sb, logger):
-                        result["error"] = (
-                            f"Cloudflare Turnstile not bypassed after "
-                            f"{cloudflare_timeout:.0f}s"
+                if call_with_stage_timeout(
+                    resolve_stage_timeout(cloudflare_stage_timeout, video_deadline_ts),
+                    f"cloudflare auto-bypass stage for {video_id}",
+                    _wait_and_recheck_cloudflare,
+                ):
+                    result["error"] = (
+                        f"Cloudflare Turnstile not bypassed after "
+                        f"{cloudflare_timeout:.0f}s"
+                    )
+                    logger.error(result["error"])
+                    try:
+                        page_source = sb.get_page_source()
+                        debug_video_id = normalize_video_storage_key(video_id)
+                        debug_file = Path(config["files"]["logs_dir"]) / (
+                            f"cloudflare_fail_{debug_video_id}.html"
                         )
-                        logger.error(result["error"])
-                        try:
-                            page_source = sb.get_page_source()
-                            debug_file = Path(config["files"]["logs_dir"]) / (
-                                f"cloudflare_fail_{video_id}.html"
-                            )
-                            with open(debug_file, "w", encoding="utf-8") as f:
-                                f.write(page_source)
-                            logger.info("Saved failed HTML to %s", debug_file)
-                        except Exception:
-                            pass
-                        return result
+                        with open(debug_file, "w", encoding="utf-8") as f:
+                            f.write(page_source)
+                        logger.info("Saved failed HTML to %s", debug_file)
+                    except Exception:
+                        pass
+                    return result
 
-                    logger.info("Cloudflare bypassed successfully")
+                logger.info("Cloudflare bypassed successfully")
 
-                runtime_state.touch("simulating mouse movement", video_id)
-                simulate_mouse_movement(sb, logger)
+            runtime_state.touch("simulating mouse movement", video_id)
+            ensure_deadline_not_exceeded(video_deadline_ts, f"processing video {video_id}")
+            simulate_mouse_movement(sb, logger)
 
-                runtime_state.touch("simulating page scroll", video_id)
-                simulate_page_scroll(sb, logger)
+            runtime_state.touch("simulating page scroll", video_id)
+            ensure_deadline_not_exceeded(video_deadline_ts, f"processing video {video_id}")
+            simulate_page_scroll(sb, logger)
 
-                reading_time = random.uniform(READING_TIME_MIN, READING_TIME_MAX)
-                runtime_state.touch("simulating reading", video_id)
-                logger.info("Simulating reading (%.1fs)...", reading_time)
-                sb.sleep(reading_time)
+            reading_time = random.uniform(READING_TIME_MIN, READING_TIME_MAX)
+            reading_time = clamp_sleep_seconds(
+                reading_time,
+                video_deadline_ts,
+                f"processing video {video_id}",
+            )
+            runtime_state.touch("simulating reading", video_id)
+            logger.info("Simulating reading (%.1fs)...", reading_time)
+            sb.sleep(reading_time)
 
-                js_timeout = max(10, int(config["settings"]["javascript_wait_time"]))
-                runtime_state.touch("clicking download button", video_id)
+            js_timeout = max(10, int(config["settings"]["javascript_wait_time"]))
+            runtime_state.touch("clicking download button", video_id)
+            try:
+                click_download_button(sb, timeout=js_timeout, logger=logger)
+                result["button_found"] = True
+            except Exception as exc:
+                iframe_best_option = None
                 try:
-                    click_download_button(sb, timeout=js_timeout, logger=logger)
+                    logger.info(
+                        "Trying Vimeo player iframe fallback for %s after page-level button miss",
+                        video_id,
+                    )
+                    iframe_best_option = probe_player_iframe_download(
+                        sb, video_id, logger, js_timeout
+                    )
+                except Exception as iframe_exc:
+                    logger.info(
+                        "Player iframe fallback did not recover %s: %s",
+                        video_id,
+                        iframe_exc,
+                    )
+
+                if iframe_best_option:
                     result["button_found"] = True
-                except Exception as exc:
+                    result["available_options"] = normalize_download_options(
+                        [iframe_best_option]
+                    )
+                    result["available_options_count"] = len(
+                        result["available_options"]
+                    )
+                    result["page_best_option"] = normalize_download_option(
+                        iframe_best_option
+                    )
+                    result["has_original_option"] = is_original_quality(
+                        iframe_best_option.get("text"), config=config
+                    )
+                    download_link = iframe_best_option["href"]
+                    result["download_source"] = "page"
+                    result["selected_quality"] = iframe_best_option.get("text")
+                    result["is_original"] = is_original_quality(
+                        result["selected_quality"],
+                        config=config,
+                    )
+                    result["download_link"] = download_link
+                    result["download_link_found"] = True
+                    result["downloadable"] = True
+                    logger.info("Got download link from player iframe fallback")
+                else:
+                    result["button_found"] = False
+                    result["probe_error"] = "Download button not found"
+                    if api_non_original_fallback:
+                        result["skipped_by_policy"] = True
+                        result["policy_reason"] = (
+                            "downloadable via api but not original; page probe failed: "
+                            "Download button not found"
+                        )
+                        logger.info(
+                            "Page probe for %s did not find button, but API already confirmed non-original downloadability (link=%s)",
+                            video_id,
+                            result.get("download_link"),
+                        )
+                        return result
+                    result["error"] = "Download button not found"
+                    logger.error("Download button not found for %s: %s", video_id, exc)
+                    try:
+                        page_source = sb.get_page_source()
+                        debug_video_id = normalize_video_storage_key(video_id)
+                        debug_file = Path(config["files"]["logs_dir"]) / (
+                            f"no_button_{debug_video_id}.html"
+                        )
+                        with open(debug_file, "w", encoding="utf-8") as f:
+                            f.write(page_source)
+                        logger.info("Saved HTML (no button) to %s", debug_file)
+                    except Exception:
+                        pass
+                    return result
+
+            if not result.get("download_link_found"):
+                runtime_state.touch("extracting modal download option", video_id)
+                options = collect_modal_download_options(sb, timeout=js_timeout)
+                result["available_options"] = normalize_download_options(options)
+                result["available_options_count"] = len(result["available_options"])
+                best_option = choose_best_download_option(options)
+                result["page_best_option"] = normalize_download_option(best_option)
+                result["has_original_option"] = any(
+                    is_original_quality(option.get("text"), config=config)
+                    for option in result["available_options"]
+                )
+
+                if not best_option:
+                    transcript_modal = False
+                    with suppress(Exception):
+                        transcript_modal = modal_looks_like_transcript(
+                            sb.get_page_source()
+                        )
+
                     iframe_best_option = None
                     try:
                         logger.info(
-                            "Trying Vimeo player iframe fallback for %s after page-level button miss",
+                            "Trying Vimeo player iframe fallback for %s after page-level modal miss",
                             video_id,
                         )
                         iframe_best_option = probe_player_iframe_download(
@@ -1644,7 +2028,7 @@ def download_video(
                         )
 
                     if iframe_best_option:
-                        result["button_found"] = True
+                        best_option = iframe_best_option
                         result["available_options"] = normalize_download_options(
                             [iframe_best_option]
                         )
@@ -1657,142 +2041,43 @@ def download_video(
                         result["has_original_option"] = is_original_quality(
                             iframe_best_option.get("text"), config=config
                         )
-                        download_link = iframe_best_option["href"]
-                        result["download_source"] = "page"
-                        result["selected_quality"] = iframe_best_option.get("text")
-                        result["is_original"] = is_original_quality(
-                            result["selected_quality"],
-                            config=config,
-                        )
-                        result["download_link"] = download_link
-                        result["download_link_found"] = True
-                        result["downloadable"] = True
-                        logger.info("Got download link from player iframe fallback")
                     else:
-                        result["button_found"] = False
-                        result["probe_error"] = "Download button not found"
+                        result["probe_error"] = (
+                            "Transcript download modal opened instead of video download"
+                            if transcript_modal
+                            else (
+                                "No download option found in modal"
+                                if result["available_options_count"] > 0
+                                else "Download modal not found"
+                            )
+                        )
                         if api_non_original_fallback:
                             result["skipped_by_policy"] = True
                             result["policy_reason"] = (
-                                "downloadable via api but not original; page probe failed: "
-                                "Download button not found"
+                                "downloadable via api but not original; page probe did not expose original "
+                                f"({result['probe_error']})"
                             )
                             logger.info(
-                                "Page probe for %s did not find button, but API already confirmed non-original downloadability (link=%s)",
+                                "Page probe for %s did not expose original; keeping API non-original metadata only (link=%s)",
                                 video_id,
                                 result.get("download_link"),
                             )
                             return result
-                        result["error"] = "Download button not found"
-                        logger.error("Download button not found for %s: %s", video_id, exc)
-                        try:
-                            page_source = sb.get_page_source()
-                            debug_file = Path(config["files"]["logs_dir"]) / (
-                                f"no_button_{video_id}.html"
-                            )
-                            with open(debug_file, "w", encoding="utf-8") as f:
-                                f.write(page_source)
-                            logger.info("Saved HTML (no button) to %s", debug_file)
-                        except Exception:
-                            pass
+                        result["error"] = result["probe_error"]
+                        logger.error(result["error"])
                         return result
 
-                if not result.get("download_link_found"):
-                    runtime_state.touch("extracting modal download option", video_id)
-                    options = collect_modal_download_options(sb, timeout=js_timeout)
-                    result["available_options"] = normalize_download_options(options)
-                    result["available_options_count"] = len(result["available_options"])
-                    best_option = choose_best_download_option(options)
-                    result["page_best_option"] = normalize_download_option(best_option)
-                    result["has_original_option"] = any(
-                        is_original_quality(option.get("text"), config=config)
-                        for option in result["available_options"]
-                    )
-
-                    if not best_option:
-                        transcript_modal = False
-                        with suppress(Exception):
-                            transcript_modal = modal_looks_like_transcript(
-                                sb.get_page_source()
-                            )
-
-                        iframe_best_option = None
-                        try:
-                            logger.info(
-                                "Trying Vimeo player iframe fallback for %s after page-level modal miss",
-                                video_id,
-                            )
-                            iframe_best_option = probe_player_iframe_download(
-                                sb, video_id, logger, js_timeout
-                            )
-                        except Exception as iframe_exc:
-                            logger.info(
-                                "Player iframe fallback did not recover %s: %s",
-                                video_id,
-                                iframe_exc,
-                            )
-
-                        if iframe_best_option:
-                            best_option = iframe_best_option
-                            result["available_options"] = normalize_download_options(
-                                [iframe_best_option]
-                            )
-                            result["available_options_count"] = len(
-                                result["available_options"]
-                            )
-                            result["page_best_option"] = normalize_download_option(
-                                iframe_best_option
-                            )
-                            result["has_original_option"] = is_original_quality(
-                                iframe_best_option.get("text"), config=config
-                            )
-                        else:
-                            result["probe_error"] = (
-                                "Transcript download modal opened instead of video download"
-                                if transcript_modal
-                                else (
-                                    "No download option found in modal"
-                                    if result["available_options_count"] > 0
-                                    else "Download modal not found"
-                                )
-                            )
-                            if api_non_original_fallback:
-                                result["skipped_by_policy"] = True
-                                result["policy_reason"] = (
-                                    "downloadable via api but not original; page probe did not expose original "
-                                    f"({result['probe_error']})"
-                                )
-                                logger.info(
-                                    "Page probe for %s did not expose original; keeping API non-original metadata only (link=%s)",
-                                    video_id,
-                                    result.get("download_link"),
-                                )
-                                return result
-                            result["error"] = result["probe_error"]
-                            logger.error(result["error"])
-                            try:
-                                page_source = sb.get_page_source()
-                                debug_file = Path(config["files"]["logs_dir"]) / (
-                                    f"no_modal_{video_id}.html"
-                                )
-                                with open(debug_file, "w", encoding="utf-8") as f:
-                                    f.write(page_source)
-                                logger.info("Saved HTML (no modal) to %s", debug_file)
-                            except Exception:
-                                pass
-                            return result
-
-                    download_link = best_option["href"]
-                    result["download_source"] = "page"
-                    result["selected_quality"] = best_option.get("text")
-                    result["is_original"] = is_original_quality(
-                        result["selected_quality"],
-                        config=config,
-                    )
-                    result["download_link"] = download_link
-                    result["download_link_found"] = True
-                    result["downloadable"] = True
-                    logger.info("Got download link")
+                download_link = best_option["href"]
+                result["download_source"] = "page"
+                result["selected_quality"] = best_option.get("text")
+                result["is_original"] = is_original_quality(
+                    result["selected_quality"],
+                    config=config,
+                )
+                result["download_link"] = download_link
+                result["download_link_found"] = True
+                result["downloadable"] = True
+                logger.info("Got download link")
 
         if download_only_original and result["is_original"] is not True:
             result["skipped_by_policy"] = True
@@ -1821,6 +2106,8 @@ def download_video(
             logger,
             config,
             video_id,
+            download_session=download_session,
+            deadline_ts=video_deadline_ts,
         )
 
         result["success"] = True
@@ -1831,6 +2118,7 @@ def download_video(
 
     except Exception as exc:
         result["error"] = str(exc)
+        result["timeout_like"] = is_timeout_like_message(exc)
         logger.error("Error downloading %s: %s", video_id, exc)
 
     return result
@@ -2101,7 +2389,8 @@ def checkpoint_resume_state(
 
 def find_existing_completed_file(video_dir, video_id):
     video_dir = Path(video_dir)
-    per_video_dir = get_video_storage_dir(video_dir, video_id)
+    normalized_video_id = normalize_video_storage_key(video_id)
+    per_video_dir = get_video_storage_dir(video_dir, normalized_video_id)
     search_roots = []
     if per_video_dir.exists():
         search_roots.append(per_video_dir)
@@ -2109,7 +2398,7 @@ def find_existing_completed_file(video_dir, video_id):
 
     seen = set()
     for root in search_roots:
-        pattern = f"{video_id}*"
+        pattern = f"{normalized_video_id}*"
         for candidate in sorted(root.glob(pattern)):
             candidate = candidate.resolve()
             if candidate in seen:
@@ -2141,18 +2430,19 @@ def should_skip_offloaded_metadata(existing_metadata, config):
 
 
 def resolve_existing_metadata_path(video_dir, json_dir, video_id):
+    normalized_video_id = normalize_video_storage_key(video_id)
     for status in ("downloaded", "skipped", "failed"):
-        preferred = get_video_metadata_path(video_dir, video_id, status=status)
+        preferred = get_video_metadata_path(video_dir, normalized_video_id, status=status)
         if preferred.exists():
             return preferred
     for bucket in ("not_downloaded", "no_links"):
-        preferred = Path(video_dir) / bucket / f"{video_id}.json"
+        preferred = Path(video_dir) / bucket / f"{normalized_video_id}.json"
         if preferred.exists():
             return preferred
-    legacy = Path(json_dir) / f"{video_id}.json"
+    legacy = Path(json_dir) / f"{normalized_video_id}.json"
     if legacy.exists():
         return legacy
-    return get_video_metadata_path(video_dir, video_id, status="downloaded")
+    return get_video_metadata_path(video_dir, normalized_video_id, status="downloaded")
 
 
 def api_error_payload(response):
@@ -2304,8 +2594,12 @@ def main():
 
     fatal_error = None
     exit_code = 0
+    controlled_restart_requested = False
+    controlled_restart_reason = None
     login_email = None
     login_password = None
+    download_session = build_download_http_session(config)
+    consecutive_timeout_failures = 0
 
     sb_kwargs = build_sb_kwargs(config, logger)
     logger.info("SeleniumBase args: %s", sb_kwargs)
@@ -2322,6 +2616,15 @@ def main():
                 logger.info("Authenticated Vimeo session requested for this worker")
             with SB(**sb_kwargs) as sb:
                 logger.info("SeleniumBase browser started")
+                page_load_timeout = int(config["settings"].get("page_load_timeout_seconds", 120))
+                if page_load_timeout > 0:
+                    try:
+                        sb.driver.set_page_load_timeout(page_load_timeout)
+                        logger.info("Browser page load timeout set to %ds", page_load_timeout)
+                    except ControlledWorkerRestart:
+                        raise
+                    except Exception as exc:
+                        logger.warning("Failed to set page load timeout: %s", exc)
                 if bool(config["runtime"].get("vimeo_authenticated_session", False)):
                     runtime_state.touch("logging into vimeo")
                     login_to_vimeo(sb, login_email, login_password, logger, config)
@@ -2419,6 +2722,16 @@ def main():
                                 current_video_id=video_id,
                                 current_stage="already downloaded",
                             )
+                            consecutive_timeout_failures = 0
+                            maybe_raise_controlled_restart(
+                                config,
+                                start_index,
+                                i,
+                                len(urls),
+                                consecutive_timeout_failures,
+                                logger,
+                                video_id,
+                            )
                             if i < len(urls):
                                 delay = random.uniform(
                                     MIN_DELAY_BETWEEN_VIDEOS,
@@ -2434,6 +2747,7 @@ def main():
                     logger.info("URL: %s", video_url)
                     logger.info("%s", "=" * 80)
 
+                    response = None
                     try:
                         logger.info("Checking video %s via API...", video_id)
                         response = client.get(f"https://api.vimeo.com/videos/{video_id}")
@@ -2442,39 +2756,31 @@ def main():
                         result = create_placeholder_result()
 
                         if response.status_code == 401:
-                            if bool(config["settings"].get("api_401_fallback_to_page", False)):
-                                logger.warning(
-                                    "API Authentication error (401) for %s. "
-                                    "Falling back to page flow because settings.api_401_fallback_to_page=true",
-                                    video_id,
-                                )
-                                api_payload = {}
-                            else:
-                                fatal_error = "API Authentication error (401) - invalid token"
-                                logger.error(fatal_error)
-                                metadata_path = save_video_metadata(
-                                    config,
-                                    video_dir,
-                                    video_id,
-                                    video_url,
-                                    None,
-                                    api_probe,
-                                    result,
-                                    "failed",
-                                    "fatal_api_401 invalid token",
-                                )
-                                update_results_manifest(
-                                    results_manifest,
-                                    i,
-                                    status="failed",
-                                    reason="fatal_api_401 invalid token",
-                                    metadata_json=str(metadata_path),
-                                    storage_bucket=get_metadata_bucket("failed", result=result),
-                                )
-                                save_results_manifest(config, results_manifest)
-                                telegram.notify_api_error(401, "Invalid API token")
-                                exit_code = 2
-                                break
+                            fatal_error = "API Authentication error (401) - invalid token"
+                            logger.error(fatal_error)
+                            metadata_path = save_video_metadata(
+                                config,
+                                video_dir,
+                                video_id,
+                                video_url,
+                                None,
+                                api_probe,
+                                result,
+                                "failed",
+                                "fatal_api_401 invalid token",
+                            )
+                            update_results_manifest(
+                                results_manifest,
+                                i,
+                                status="failed",
+                                reason="fatal_api_401 invalid token",
+                                metadata_json=str(metadata_path),
+                                storage_bucket=get_metadata_bucket("failed", result=result),
+                            )
+                            save_results_manifest(config, results_manifest)
+                            telegram.notify_api_error(401, "Invalid API token")
+                            exit_code = 2
+                            break
 
                         if response.status_code == 429:
                             fatal_error = "API rate limit exceeded (429)"
@@ -2577,6 +2883,16 @@ def main():
                                 current_video_id=video_id,
                                 current_stage="skipped",
                             )
+                            consecutive_timeout_failures = 0
+                            maybe_raise_controlled_restart(
+                                config,
+                                start_index,
+                                i,
+                                len(urls),
+                                consecutive_timeout_failures,
+                                logger,
+                                video_id,
+                            )
                             if i < len(urls):
                                 delay = random.uniform(
                                     MIN_DELAY_BETWEEN_VIDEOS,
@@ -2635,6 +2951,16 @@ def main():
                                 failed_videos,
                                 current_video_id=video_id,
                                 current_stage="404 skip",
+                            )
+                            consecutive_timeout_failures = 0
+                            maybe_raise_controlled_restart(
+                                config,
+                                start_index,
+                                i,
+                                len(urls),
+                                consecutive_timeout_failures,
+                                logger,
+                                video_id,
                             )
                             if i < len(urls):
                                 delay = random.uniform(
@@ -2703,6 +3029,16 @@ def main():
                                 current_video_id=video_id,
                                 current_stage="privacy skip",
                             )
+                            consecutive_timeout_failures = 0
+                            maybe_raise_controlled_restart(
+                                config,
+                                start_index,
+                                i,
+                                len(urls),
+                                consecutive_timeout_failures,
+                                logger,
+                                video_id,
+                            )
                             if i < len(urls):
                                 delay = random.uniform(
                                     MIN_DELAY_BETWEEN_VIDEOS,
@@ -2729,9 +3065,8 @@ def main():
                             )
 
                         retry_attempts = int(config["settings"]["retry_attempts"])
-                        retry_delay = int(config["settings"]["retry_delay"])
+                        video_deadline_ts = build_video_deadline(config["settings"])
                         result = None
-                        cached_download = None
                         for attempt in range(1, retry_attempts + 1):
                             runtime_state.touch(f"download attempt {attempt}", video_id)
                             result = download_video(
@@ -2743,27 +3078,37 @@ def main():
                                 logger,
                                 config,
                                 runtime_state,
+                                download_session=download_session,
                                 login_email=login_email,
                                 login_password=login_password,
                                 cloudflare_retry_count=attempt - 1,
-                                cached_download=cached_download,
+                                video_deadline_ts=video_deadline_ts,
                             )
                             if result["success"]:
                                 break
                             if result.get("skipped_by_policy"):
                                 break
-                            if result.get("download_link"):
-                                cached_download = {
-                                    "download_link": result.get("download_link"),
-                                    "download_source": result.get("download_source"),
-                                    "selected_quality": result.get("selected_quality"),
-                                    "is_original": result.get("is_original"),
-                                    "downloadable": result.get("downloadable"),
-                                    "button_found": result.get("button_found"),
-                                }
                             if attempt < retry_attempts:
+                                remaining_retry_budget = remaining_deadline_seconds(video_deadline_ts)
+                                if remaining_retry_budget is not None and remaining_retry_budget <= 0:
+                                    logger.warning(
+                                        "Overall video timeout budget exhausted for %s after attempt %d/%d",
+                                        video_id,
+                                        attempt,
+                                        retry_attempts,
+                                    )
+                                    break
+                                retry_delay = compute_retry_delay(config["settings"], attempt)
+                                if remaining_retry_budget is not None:
+                                    retry_delay = min(retry_delay, max(0.0, remaining_retry_budget))
+                                if retry_delay <= 0:
+                                    logger.warning(
+                                        "Skipping retry delay for %s because no overall video time budget remains",
+                                        video_id,
+                                    )
+                                    break
                                 logger.warning(
-                                    "Attempt %d/%d failed for %s: %s. Retrying in %ss",
+                                    "Attempt %d/%d failed for %s: %s. Retrying in %.1fs",
                                     attempt,
                                     retry_attempts,
                                     video_id,
@@ -2833,6 +3178,7 @@ def main():
                                 len(urls),
                                 successful_downloads,
                             )
+                            consecutive_timeout_failures = 0
                         elif result and result.get("skipped_by_policy"):
                             skipped_videos += 1
                             reason = (
@@ -2896,6 +3242,7 @@ def main():
                                 current_video_id=video_id,
                                 current_stage="non-original skip",
                             )
+                            consecutive_timeout_failures = 0
                         else:
                             failed_videos += 1
                             error_message = result["error"] if result else "Unknown error"
@@ -2967,6 +3314,12 @@ def main():
                                 len(urls),
                                 stage="download",
                             )
+                            if result and result.get("timeout_like"):
+                                consecutive_timeout_failures += 1
+                            elif is_timeout_like_message(error_message):
+                                consecutive_timeout_failures += 1
+                            else:
+                                consecutive_timeout_failures = 0
 
                         telegram.notify_progress(
                             i,
@@ -2976,6 +3329,15 @@ def main():
                             failed_videos,
                             current_video_id=video_id,
                             current_stage=runtime_state.snapshot()["current_stage"],
+                        )
+                        maybe_raise_controlled_restart(
+                            config,
+                            start_index,
+                            i,
+                            len(urls),
+                            consecutive_timeout_failures,
+                            logger,
+                            video_id,
                         )
 
                         if i < len(urls):
@@ -3049,7 +3411,27 @@ def main():
                             len(urls),
                             stage="api_check",
                         )
+                        if is_timeout_like_message(exc):
+                            consecutive_timeout_failures += 1
+                        else:
+                            consecutive_timeout_failures = 0
+                        maybe_raise_controlled_restart(
+                            config,
+                            start_index,
+                            i,
+                            len(urls),
+                            consecutive_timeout_failures,
+                            logger,
+                            video_id,
+                        )
+                    finally:
+                        close_response_quietly(response)
 
+    except ControlledWorkerRestart as exc:
+        controlled_restart_requested = True
+        controlled_restart_reason = str(exc)
+        exit_code = CONTROLLED_RESTART_EXIT_CODE
+        logger.warning("Worker requested controlled restart: %s", exc)
     except Exception as exc:
         fatal_error = str(exc)
         exit_code = 1
@@ -3064,6 +3446,7 @@ def main():
     finally:
         watchdog.stop()
         watchdog.join(timeout=10)
+        close_session_quietly(download_session)
 
     total_processed = successful_downloads + skipped_videos + failed_videos
     if config["resume"]["enabled"] and total_processed >= len(urls):
@@ -3110,6 +3493,8 @@ def main():
         "failed_urls": len(failed_urls),
         "exit_code": exit_code,
         "fatal_error": fatal_error,
+        "restart_requested": controlled_restart_requested,
+        "restart_reason": controlled_restart_reason,
         "log_file": config["files"]["log_file"],
         "videos_dir": config["files"]["videos_dir"],
         "jsons_dir": config["files"]["jsons_dir"],

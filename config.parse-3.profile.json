@@ -1,5 +1,5 @@
 {
-  "secrets_file": "config.parse-3.secrets.json",
+  "secrets_file": "config.parse-3.secrets.local.json",
   "files": {
     "source_json": "need_parse_unique.json",
     "videos_dir": "output/runs/parse-3/videos",
@@ -45,8 +45,8 @@
     "download_interface": "wg-vimeo",
     "download_retry_interface": "",
     "api_401_fallback_to_page": true,
-    "direct_download_timeout_seconds": 180,
-    "curl_stall_timeout_seconds": 90,
+    "direct_download_timeout_seconds": 10,
+    "curl_stall_timeout_seconds": 60,
     "login_completion_timeout_seconds": 30,
     "login_retry_attempts": 3,
     "login_retry_delay_seconds": 20
@@ -94,7 +94,7 @@
   },
   "workers": {
     "count": 10,
-    "stagger_start_seconds": 45,
+    "stagger_start_seconds": 30,
     "shared_media_dirs": true,
     "api_pool": []
   },

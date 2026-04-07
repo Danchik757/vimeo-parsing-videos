@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from download_vimeo_seleniumbase_v3 import PROJECT_ROOT, load_config, setup_logger
-from launcher_support import configure_launched_worker_notifications, get_storage_snapshot
+from download_vimeo_seleniumbase_v3 import (
+    CONTROLLED_RESTART_EXIT_CODE,
+    PROJECT_ROOT,
+    load_config,
+    setup_logger,
+)
 from result_exports import write_result_url_lists
 from telegram_notifier import TelegramNotifier
 
@@ -34,6 +40,147 @@ def write_json(path, payload):
     with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
     temp_path.replace(path)
+
+
+def format_bytes(num_bytes):
+    size = float(max(0, int(num_bytes or 0)))
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    unit_index = 0
+    while size >= 1024 and unit_index < len(units) - 1:
+        size /= 1024.0
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(size)} {units[unit_index]}"
+    return f"{size:.1f} {units[unit_index]}"
+
+
+def load_offload_storage_usage(config, logger=None):
+    offload_cfg = config.get("offload", {})
+    if not offload_cfg.get("enabled"):
+        return None
+
+    registry_value = offload_cfg.get("registry_file") or ""
+    if not registry_value:
+        return None
+
+    registry_path = Path(registry_value)
+    if not registry_path.exists():
+        return {"uploaded_count": 0, "total_bytes": 0}
+
+    try:
+        registry = read_json(registry_path)
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("Failed to read offload registry %s: %s", registry_path, exc)
+        return None
+
+    total_bytes = 0
+    uploaded_count = 0
+    items = registry.get("items", {})
+    if not isinstance(items, dict):
+        return {"uploaded_count": 0, "total_bytes": 0}
+
+    for item in items.values():
+        if not isinstance(item, dict) or item.get("status") != "uploaded":
+            continue
+        uploaded_count += 1
+        try:
+            total_bytes += max(0, int(item.get("file_size_bytes") or 0))
+        except (TypeError, ValueError):
+            continue
+
+    return {"uploaded_count": uploaded_count, "total_bytes": total_bytes}
+
+
+def read_sockstat_file(path):
+    path = Path(path)
+    if not path.exists():
+        return {}
+
+    stats = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or ":" not in line:
+                    continue
+                family, tail = line.split(":", 1)
+                parts = tail.strip().split()
+                metrics = {}
+                for index in range(0, len(parts) - 1, 2):
+                    key = parts[index]
+                    value = parts[index + 1]
+                    try:
+                        metrics[key] = int(value)
+                    except ValueError:
+                        continue
+                stats[family.lower()] = metrics
+    except Exception:
+        return {}
+
+    return stats
+
+
+def load_socket_usage(logger=None):
+    sockstat = read_sockstat_file("/proc/net/sockstat")
+    sockstat6 = read_sockstat_file("/proc/net/sockstat6")
+
+    try:
+        tcp_inuse = int(sockstat.get("tcp", {}).get("inuse", 0)) + int(
+            sockstat6.get("tcp6", {}).get("inuse", 0)
+        )
+        tcp_timewait = int(sockstat.get("tcp", {}).get("tw", 0))
+        tcp_orphan = int(sockstat.get("tcp", {}).get("orphan", 0))
+        tcp_alloc = int(sockstat.get("tcp", {}).get("alloc", 0))
+        udp_inuse = int(sockstat.get("udp", {}).get("inuse", 0)) + int(
+            sockstat6.get("udp6", {}).get("inuse", 0)
+        )
+        raw_inuse = int(sockstat.get("raw", {}).get("inuse", 0)) + int(
+            sockstat6.get("raw6", {}).get("inuse", 0)
+        )
+        sockets_used = int(sockstat.get("sockets", {}).get("used", 0))
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("Failed to parse socket counters: %s", exc)
+        return None
+
+    return {
+        "sockets_used": sockets_used,
+        "tcp_inuse": tcp_inuse,
+        "tcp_timewait": tcp_timewait,
+        "tcp_orphan": tcp_orphan,
+        "tcp_alloc": tcp_alloc,
+        "udp_inuse": udp_inuse,
+        "raw_inuse": raw_inuse,
+    }
+
+
+def evaluate_socket_pressure(config, logger=None):
+    workers_cfg = config.get("workers", {})
+    if not bool(workers_cfg.get("socket_pressure_gate_enabled", True)):
+        return None
+
+    socket_usage = load_socket_usage(logger=logger)
+    if socket_usage is None:
+        return None
+
+    checks = (
+        ("tcp_inuse", "max_tcp_inuse_to_start_worker"),
+        ("tcp_timewait", "max_tcp_timewait_to_start_worker"),
+        ("tcp_orphan", "max_tcp_orphan_to_start_worker"),
+    )
+    reasons = []
+    for metric_key, limit_key in checks:
+        limit = int(workers_cfg.get(limit_key, 0) or 0)
+        if limit > 0 and int(socket_usage.get(metric_key, 0)) >= limit:
+            reasons.append(
+                f"{metric_key}={int(socket_usage.get(metric_key, 0))} >= {limit_key}={limit}"
+            )
+
+    if not reasons:
+        return None
+
+    return {"usage": socket_usage, "reasons": reasons}
 
 
 def parse_args():
@@ -332,7 +479,7 @@ def merge_shard_results(global_results, shard_results, batch_number, worker_name
     )
 
 
-def build_assignment_summary(manifest, selected_batches, state, global_results, worker_count, storage_root=None):
+def build_assignment_summary(manifest, selected_batches, state, global_results, worker_count):
     items = state.get("items", {})
     completed_batches = sum(1 for item in items.values() if item.get("status") == "completed")
     running_batches = sum(1 for item in items.values() if item.get("status") == "running")
@@ -342,7 +489,7 @@ def build_assignment_summary(manifest, selected_batches, state, global_results, 
     total_urls = int(global_results.get("total_urls", 0))
     finalized = int(counts.get("finalized", 0))
 
-    summary = {
+    return {
         "server_name": manifest["server_name"],
         "manifest_path": manifest["manifest_path"],
         "updated_at": now_string(),
@@ -360,10 +507,6 @@ def build_assignment_summary(manifest, selected_batches, state, global_results, 
         "remaining_urls": max(0, total_urls - finalized),
         "completed": pending_batches == 0 and running_batches == 0 and failed_batches == 0,
     }
-    storage = get_storage_snapshot(storage_root)
-    if storage:
-        summary["storage"] = storage
-    return summary
 
 
 def build_worker_slot_summary(slot_name, slot_index, batch_number=None):
@@ -375,6 +518,7 @@ def build_worker_slot_summary(slot_name, slot_index, batch_number=None):
         "downloaded": 0,
         "skipped": 0,
         "failed": 0,
+        "restarts_requested": 0,
         "total_processed": 0,
         "updated_at": now_string(),
     }
@@ -392,6 +536,7 @@ def load_worker_slot_summary(slot_dir, slot_name, slot_index):
     payload.setdefault("downloaded", 0)
     payload.setdefault("skipped", 0)
     payload.setdefault("failed", 0)
+    payload.setdefault("restarts_requested", 0)
     payload.setdefault("total_processed", 0)
     return payload
 
@@ -487,7 +632,6 @@ def build_batch_worker_config(master_config, batch_dir, source_json_path, batch_
     else:
         batch_config["runtime"]["api_pool_slot"] = None
 
-    configure_launched_worker_notifications(batch_config)
     return worker_name, batch_config
 
 
@@ -540,7 +684,7 @@ def next_pending_batch(state):
     return None
 
 
-def build_progress_lines(state, global_results, active_processes, storage_root=None):
+def build_progress_lines(state, global_results, active_processes, master_config, logger=None):
     snapshot = build_progress_snapshot(global_results, active_processes)
     counts = snapshot["counts"]
     items = state.get("items", {})
@@ -558,9 +702,24 @@ def build_progress_lines(state, global_results, active_processes, storage_root=N
         f"failed_logged: <code>{int(counts.get('failed', 0))}</code>",
         f"batches: <code>completed={completed_batches} running={running_batches} pending={pending_batches} failed={failed_batches}</code>",
     ]
-    storage = get_storage_snapshot(storage_root)
-    if storage:
-        lines.append(f"storage_used: <code>{storage['human']}</code>")
+    storage_usage = load_offload_storage_usage(master_config, logger=logger)
+    if storage_usage is not None:
+        lines.append(
+            "storage_uploaded_media: "
+            f"<code>{format_bytes(storage_usage['total_bytes'])} ({storage_usage['uploaded_count']} videos)</code>"
+        )
+    socket_usage = load_socket_usage(logger=logger)
+    if socket_usage is not None:
+        lines.append(
+            "sockets: "
+            f"<code>used={socket_usage['sockets_used']} "
+            f"tcp_inuse={socket_usage['tcp_inuse']} "
+            f"tcp_tw={socket_usage['tcp_timewait']} "
+            f"tcp_orphan={socket_usage['tcp_orphan']} "
+            f"tcp_alloc={socket_usage['tcp_alloc']} "
+            f"udp_inuse={socket_usage['udp_inuse']} "
+            f"raw_inuse={socket_usage['raw_inuse']}</code>"
+        )
     for worker_name in sorted(active_processes):
         item = active_processes[worker_name]
         live_counts = snapshot["worker_live"].get(worker_name, {})
@@ -578,10 +737,21 @@ def build_progress_lines(state, global_results, active_processes, storage_root=N
 
 
 def terminate_process(process, logger, label):
-    try:
-        process.terminate()
-    except Exception:
-        return
+    pgid = None
+    if getattr(process, "pid", None):
+        pgid = int(process.pid)
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pgid = None
+        except Exception:
+            pgid = None
+
+    if pgid is None:
+        try:
+            process.terminate()
+        except Exception:
+            return
 
     deadline = time.time() + 10
     while time.time() < deadline:
@@ -590,8 +760,44 @@ def terminate_process(process, logger, label):
         time.sleep(0.5)
 
     logger.warning("Force-killing %s after terminate timeout", label)
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except Exception:
+            pass
     try:
         process.kill()
+    except Exception:
+        pass
+
+
+def cleanup_process_group_after_exit(process, logger, label):
+    if not getattr(process, "pid", None):
+        return
+    try:
+        os.killpg(int(process.pid), signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception as exc:
+        logger.debug("Could not clean process group for %s: %s", label, exc)
+        return
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            os.killpg(int(process.pid), 0)
+        except ProcessLookupError:
+            return
+        except Exception:
+            return
+        time.sleep(0.2)
+
+    logger.warning("Force-killing leftover process group for %s", label)
+    try:
+        os.killpg(int(process.pid), signal.SIGKILL)
     except Exception:
         pass
 
@@ -626,7 +832,6 @@ def main():
     logger.info("Server name: %s", assignment["server_name"])
     logger.info("Selected shard batches: %d", len(selected_batches))
     logger.info("Worker slots: %d", worker_count)
-    storage_root = master_config.get("offload", {}).get("storage_root")
 
     state_path = workers_root / "assignment_state.json"
     results_path = workers_root / "aggregate_results_manifest.json"
@@ -638,14 +843,7 @@ def main():
 
     global_results = load_assignment_results(results_path, assignment, selected_batches, logger)
     save_assignment_results(results_path, global_results)
-    aggregate_summary = build_assignment_summary(
-        assignment,
-        selected_batches,
-        state,
-        global_results,
-        worker_count,
-        storage_root=storage_root,
-    )
+    aggregate_summary = build_assignment_summary(assignment, selected_batches, state, global_results, worker_count)
     write_json(summary_path, aggregate_summary)
     exported_lists = write_result_url_lists(global_results.get("items", []), workers_root)
 
@@ -661,7 +859,6 @@ def main():
             f"workers: <code>{worker_count}</code>",
             f"selected_batches: <code>{len(selected_batches)}</code>",
             f"manifest: <code>{assignment['manifest_path']}</code>",
-            f"storage_root: <code>{storage_root}</code>" if storage_root else "storage_root: <code>-</code>",
         ],
     )
 
@@ -679,6 +876,7 @@ def main():
     stop_requested = False
     exit_code = 0
     last_progress_ts = 0.0
+    last_socket_pressure_log_ts = 0.0
 
     while True:
         if not stop_requested:
@@ -686,6 +884,28 @@ def main():
                 slot_name = f"worker-{slot_index:02d}"
                 if slot_name in active_processes:
                     continue
+
+                socket_pressure = evaluate_socket_pressure(master_config, logger=logger)
+                if socket_pressure is not None:
+                    now = time.time()
+                    cooldown_seconds = max(
+                        5,
+                        int(
+                            master_config.get("workers", {}).get(
+                                "socket_pressure_cooldown_seconds",
+                                30,
+                            )
+                            or 30
+                        ),
+                    )
+                    if now - last_socket_pressure_log_ts >= cooldown_seconds:
+                        logger.warning(
+                            "Delaying new worker start due to socket pressure: %s",
+                            "; ".join(socket_pressure["reasons"]),
+                        )
+                        last_socket_pressure_log_ts = now
+                    break
+
                 batch_item = next_pending_batch(state)
                 if batch_item is None:
                     break
@@ -717,6 +937,7 @@ def main():
                     cwd=str(PROJECT_ROOT),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.STDOUT,
+                    start_new_session=True,
                 )
                 active_processes[slot_name] = {
                     "worker_name": worker_name,
@@ -763,13 +984,50 @@ def main():
                 batch_number,
                 return_code,
             )
+            cleanup_process_group_after_exit(process, logger, slot_name)
 
             state_item = state["items"][batch_key]
             state_item["finished_at"] = now_string()
             state_item["exit_code"] = return_code
             slot_summaries[slot_name]["active_batch_number"] = None
 
-            if return_code == 0 and batch_summary_path.exists() and batch_results_path.exists():
+            if return_code == CONTROLLED_RESTART_EXIT_CODE:
+                state_item["status"] = "pending"
+                state_item["assigned_worker"] = None
+                state_item["exit_code"] = None
+                state_item["last_error"] = None
+                state_item["last_restart"] = {
+                    "at": now_string(),
+                    "batch_number": batch_number,
+                    "exit_code": return_code,
+                    "summary_exists": bool(batch_summary_path.exists()),
+                    "results_exists": bool(batch_results_path.exists()),
+                }
+                slot_summaries[slot_name]["restarts_requested"] = int(
+                    slot_summaries[slot_name].get("restarts_requested", 0)
+                ) + 1
+                save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
+                logger.warning(
+                    "Batch %04d requested controlled restart (exit_code=%s, summary=%s, results=%s); re-queueing without failure",
+                    batch_number,
+                    return_code,
+                    batch_summary_path.exists(),
+                    batch_results_path.exists(),
+                )
+                if telegram.notify_on_error:
+                    telegram.notify_custom(
+                        "Assignment batch recycle",
+                        [
+                            f"worker: <code>{slot_name}</code>",
+                            f"batch: <code>{batch_number:04d}</code>",
+                            f"shard: <code>{Path(item['source_json']).name}</code>",
+                            f"exit_code: <code>{return_code}</code>",
+                            f"summary_exists: <code>{batch_summary_path.exists()}</code>",
+                            f"results_exists: <code>{batch_results_path.exists()}</code>",
+                            "action: <code>requeued with existing resume state</code>",
+                        ],
+                    )
+            elif return_code == 0 and batch_summary_path.exists() and batch_results_path.exists():
                 batch_summary = read_json(batch_summary_path)
                 batch_results = read_json(batch_results_path)
                 merge_shard_results(global_results, batch_results, batch_number, slot_name)
@@ -861,7 +1119,6 @@ def main():
                 state,
                 global_results,
                 worker_count,
-                storage_root=storage_root,
             )
             aggregate_summary["url_list_exports"] = exported_lists
             aggregate_summary["exit_code"] = exit_code
@@ -898,7 +1155,8 @@ def main():
                     state,
                     global_results,
                     active_processes,
-                    storage_root=storage_root,
+                    master_config,
+                    logger=logger,
                 ),
             )
             last_progress_ts = now
@@ -909,7 +1167,6 @@ def main():
         state,
         global_results,
         worker_count,
-        storage_root=storage_root,
     )
     exported_lists = write_result_url_lists(global_results.get("items", []), workers_root)
     aggregate_summary["url_list_exports"] = exported_lists
@@ -932,16 +1189,6 @@ def main():
             f"downloaded: <code>{aggregate_summary['downloaded']}</code>",
             f"skipped: <code>{aggregate_summary['skipped']}</code>",
             f"failed_logged: <code>{aggregate_summary['failed_logged']}</code>",
-            (
-                f"storage_used: <code>{aggregate_summary['storage']['human']}</code>"
-                if aggregate_summary.get("storage")
-                else "storage_used: <code>missing</code>"
-            ),
-            (
-                f"storage_root: <code>{aggregate_summary['storage']['path']}</code>"
-                if aggregate_summary.get("storage")
-                else "storage_root: <code>-</code>"
-            ),
             f"summary: <code>{summary_path}</code>",
             f"results: <code>{results_path}</code>",
             f"downloaded_urls: <code>{exported_lists['downloaded_original']}</code>",
