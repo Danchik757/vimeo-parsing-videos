@@ -25,6 +25,7 @@ from config_utils import load_json_config_with_optional_secrets, resolve_path
 REQUIRED_PYTHON_MODULES = ("requests", "vimeo", "seleniumbase")
 TCP_TARGETS = (
     ("github.com", 443, "GitHub HTTPS"),
+    ("vimeo.com", 443, "Vimeo Web"),
     ("api.vimeo.com", 443, "Vimeo API"),
     ("api.telegram.org", 443, "Telegram API"),
 )
@@ -252,6 +253,42 @@ def check_interface_state(interface_name):
         return False, stderr or stdout or f"interface {interface_name} not found"
     line = stdout.splitlines()[0] if stdout else ""
     return ("UP" in line and "LOWER_UP" in line), line
+
+
+def find_rule_table_for_source_ip(source_ip):
+    ip_binary = shutil.which("ip")
+    if not ip_binary:
+        return False, "ip command not found"
+    rc, stdout, stderr = run_command([ip_binary, "rule", "show"], timeout=10)
+    if rc != 0:
+        return False, stderr or stdout or "ip rule show failed"
+
+    for line in stdout.splitlines():
+        if f"from {source_ip}" not in line:
+            continue
+        parts = line.split()
+        if "lookup" in parts:
+            idx = parts.index("lookup")
+            if idx + 1 < len(parts):
+                return True, parts[idx + 1]
+    return False, f"no ip rule for source {source_ip}"
+
+
+def route_table_has_default_dev(table_name, interface_name):
+    ip_binary = shutil.which("ip")
+    if not ip_binary:
+        return False, "ip command not found"
+    rc, stdout, stderr = run_command(
+        [ip_binary, "route", "show", "table", str(table_name)],
+        timeout=10,
+    )
+    if rc != 0:
+        return False, stderr or stdout or f"ip route show table {table_name} failed"
+
+    for line in stdout.splitlines():
+        if line.startswith("default ") and f"dev {interface_name}" in line:
+            return True, line
+    return False, stdout or f"no default route via {interface_name} in table {table_name}"
 
 
 def check_dns(hostname):
@@ -543,11 +580,41 @@ def check_interfaces_and_network(config, reporter):
         else:
             reporter.fail("download interface", detail)
 
+        if source_address:
+            iface = get_interface_for_source_ip(source_address)
+            if iface and iface == download_interface:
+                reporter.pass_(
+                    "source address matches download interface",
+                    f"{source_address} -> {download_interface}",
+                )
+            elif iface:
+                reporter.warn(
+                    "source address interface mismatch",
+                    f"{source_address} is on {iface}, download_interface={download_interface}",
+                )
+
+            ok, detail = find_rule_table_for_source_ip(source_address)
+            if ok:
+                reporter.pass_("policy routing rule", f"from {source_address} lookup {detail}")
+                route_ok, route_detail = route_table_has_default_dev(detail, download_interface)
+                if route_ok:
+                    reporter.pass_("policy routing default route", route_detail)
+                else:
+                    reporter.fail("policy routing default route", route_detail)
+            else:
+                reporter.fail("policy routing rule", detail)
+
         ok, detail = curl_interface_head(download_interface, "https://api.telegram.org", timeout=10)
         if ok:
             reporter.pass_("curl via download interface to Telegram", detail)
         else:
             reporter.fail("curl via download interface to Telegram", detail)
+
+        ok, detail = curl_interface_head(download_interface, "https://vimeo.com", timeout=10)
+        if ok:
+            reporter.pass_("curl via download interface to Vimeo web", detail)
+        else:
+            reporter.fail("curl via download interface to Vimeo web", detail)
 
         ok, detail = curl_interface_head(download_interface, "https://api.vimeo.com", timeout=10)
         if ok:

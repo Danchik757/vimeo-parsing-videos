@@ -71,7 +71,7 @@ def parse_args():
     )
     parser.add_argument(
         "--wg-interface",
-        default="telegram-wg",
+        default="wg-vimeo",
         help="WireGuard interface to inspect. Use empty string to disable WG metrics.",
     )
     return parser.parse_args()
