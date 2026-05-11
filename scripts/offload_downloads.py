@@ -95,7 +95,7 @@ def setup_logger(log_file):
     logger.propagate = False
 
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    file_handler = logging.FileHandler(log_path)
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(formatter)
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)

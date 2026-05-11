@@ -19,6 +19,21 @@ DOWNLOAD_BUTTON_SELECTORS = [
     "button[title*='Download']",
 ]
 
+DRIVER_TRANSPORT_FAILURE_MARKERS = (
+    "invalid session id",
+    "session deleted",
+    "chrome not reachable",
+    "disconnected",
+    "not connected to devtools",
+    "web view not found",
+    "target window already closed",
+    "target closed",
+    "no such window",
+    "connection refused",
+    "connection reset",
+    "failed to check if window was closed",
+)
+
 
 def _sleep(sb, seconds):
     if hasattr(sb, "sleep"):
@@ -29,6 +44,24 @@ def _sleep(sb, seconds):
 
 def _normalize_text(value):
     return " ".join((value or "").split())
+
+
+def _looks_like_driver_transport_failure(exc):
+    text = _normalize_text(str(exc)).lower()
+    return any(marker in text for marker in DRIVER_TRANSPORT_FAILURE_MARKERS)
+
+
+def _raise_if_driver_transport_failure(exc, context, logger=None):
+    if not _looks_like_driver_transport_failure(exc):
+        return False
+    if logger:
+        logger.warning("%s failed because browser session became unhealthy: %s", context, exc)
+    raise RuntimeError(f"{context} failed because browser session became unhealthy: {exc}") from exc
+
+
+def _log_optional_dom_exception(logger, context, exc):
+    if logger:
+        logger.debug("%s fallback skipped: %s", context, exc)
 
 
 def _matches_download_href(href):
@@ -82,12 +115,15 @@ def modal_looks_like_transcript(page_html):
     return "download transcript" in html_text or "captions.vtt" in html_text
 
 
-def _extract_download_options_from_scope(scope_element):
+def _extract_download_options_from_scope(scope_element, logger=None):
     options = []
 
     rows = []
-    with suppress(Exception):
+    try:
         rows = scope_element.query_selector_all("[id^='download-file']")
+    except Exception as exc:
+        _raise_if_driver_transport_failure(exc, "querying download rows", logger=logger)
+        _log_optional_dom_exception(logger, "querying download rows", exc)
 
     for row in rows or []:
         link = None
@@ -112,8 +148,11 @@ def _extract_download_options_from_scope(scope_element):
         return options
 
     links = []
-    with suppress(Exception):
+    try:
         links = scope_element.query_selector_all("a[href]")
+    except Exception as exc:
+        _raise_if_driver_transport_failure(exc, "querying download links", logger=logger)
+        _log_optional_dom_exception(logger, "querying download links", exc)
 
     for link in links or []:
         href = ""
@@ -132,7 +171,7 @@ def _extract_download_options_from_scope(scope_element):
     return options
 
 
-def _iter_player_iframe_elements(sb):
+def _iter_player_iframe_elements(sb, logger=None):
     driver = getattr(sb, "driver", None)
     if driver is None:
         return []
@@ -140,8 +179,11 @@ def _iter_player_iframe_elements(sb):
     with suppress(Exception):
         driver.switch_to.default_content()
 
-    with suppress(Exception):
+    try:
         return driver.find_elements(By.CSS_SELECTOR, "iframe[src*='player.vimeo.com/video/']")
+    except Exception as exc:
+        _raise_if_driver_transport_failure(exc, "finding Vimeo player iframe", logger=logger)
+        _log_optional_dom_exception(logger, "finding Vimeo player iframe", exc)
     return []
 
 
@@ -379,7 +421,7 @@ def click_download_button_in_player_iframe(sb, timeout=10, logger=None):
     last_error = None
 
     while time.time() < deadline:
-        for iframe in _iter_player_iframe_elements(sb):
+        for iframe in _iter_player_iframe_elements(sb, logger=logger):
             driver = getattr(sb, "driver", None)
             if driver is None:
                 continue
@@ -388,6 +430,11 @@ def click_download_button_in_player_iframe(sb, timeout=10, logger=None):
                 driver.switch_to.frame(iframe)
                 return _click_download_button_in_current_frame(driver, logger=logger)
             except Exception as exc:
+                _raise_if_driver_transport_failure(
+                    exc,
+                    "probing player iframe download button",
+                    logger=logger,
+                )
                 last_error = exc
             finally:
                 with suppress(Exception):
@@ -409,18 +456,31 @@ def extract_best_modal_download(sb, timeout=10, logger=None):
         scope_element = None
 
         for selector in ("section[aria-modal='true']", "[role='dialog'][aria-modal='true']"):
-            with suppress(Exception):
+            try:
                 scope_element = sb.wait_for_query_selector(selector, timeout=1)
                 scope = "modal"
                 modal_seen = True
                 break
+            except Exception as exc:
+                _raise_if_driver_transport_failure(
+                    exc,
+                    f"waiting for download modal selector {selector}",
+                    logger=logger,
+                )
 
         if scope_element is None and hasattr(sb, "cdp"):
-            with suppress(Exception):
+            try:
                 scope_element = sb.cdp.select("body", timeout=1)
+            except Exception as exc:
+                _raise_if_driver_transport_failure(
+                    exc,
+                    "selecting page body for download fallback",
+                    logger=logger,
+                )
+                _log_optional_dom_exception(logger, "selecting page body for download fallback", exc)
 
         if scope_element is not None:
-            last_options = _extract_download_options_from_scope(scope_element)
+            last_options = _extract_download_options_from_scope(scope_element, logger=logger)
             best_option = choose_best_download_option(last_options)
             if best_option:
                 if logger:
@@ -431,7 +491,7 @@ def extract_best_modal_download(sb, timeout=10, logger=None):
                     )
                 return best_option
 
-        with suppress(Exception):
+        try:
             html_options = _extract_download_links_from_html(sb.get_page_source())
             if html_options:
                 last_options = html_options
@@ -443,6 +503,13 @@ def extract_best_modal_download(sb, timeout=10, logger=None):
                             best_option.get("text") or best_option.get("href"),
                         )
                     return best_option
+        except Exception as exc:
+            _raise_if_driver_transport_failure(
+                exc,
+                "reading page source for html download fallback",
+                logger=logger,
+            )
+            _log_optional_dom_exception(logger, "reading page source for html download fallback", exc)
         _sleep(sb, 0.5)
 
     if modal_seen:
@@ -458,7 +525,7 @@ def extract_best_player_iframe_download(sb, timeout=10, logger=None):
     transcript_seen = False
 
     while time.time() < deadline:
-        for iframe in _iter_player_iframe_elements(sb):
+        for iframe in _iter_player_iframe_elements(sb, logger=logger):
             driver = getattr(sb, "driver", None)
             if driver is None:
                 continue
@@ -466,7 +533,13 @@ def extract_best_player_iframe_download(sb, timeout=10, logger=None):
                 driver.switch_to.default_content()
                 driver.switch_to.frame(iframe)
                 frame_html = driver.page_source
-            except Exception:
+            except Exception as exc:
+                _raise_if_driver_transport_failure(
+                    exc,
+                    "reading player iframe page source",
+                    logger=logger,
+                )
+                _log_optional_dom_exception(logger, "reading player iframe page source", exc)
                 with suppress(Exception):
                     driver.switch_to.default_content()
                 continue

@@ -74,11 +74,11 @@
   },
   "watchdog": {
     "enabled": true,
-    "stall_alert_after_seconds": 1800,
-    "repeat_alert_every_seconds": 1800,
+    "stall_alert_after_seconds": 600,
+    "repeat_alert_every_seconds": 600,
     "heartbeat_every_seconds": 900,
     "exit_on_stall": true,
-    "stall_exit_after_seconds": 3600
+    "stall_exit_after_seconds": 900
   },
   "resume": {
     "enabled": true,

@@ -1,0 +1,37 @@
+{
+  "remaining_source_name": "need_parse_unique.remaining_after_linux_progress_20260511.json",
+  "assumption": "Count-based cut from coordinator progress only. Fully completed batches are removed entirely. For active batches, the first d+s+f URLs are removed in batch order. This also removes failed URLs inside the processed prefix because per-URL manifests from the old machine are unavailable.",
+  "notes": [
+    "parse-1 snapshot had 0 completed batches, 8 running batches (0001-0008), 16 pending batches.",
+    "parse-3 snapshot had 6 completed batches inferred as 0043, 0044, 0046, 0048, 0049, 0051 because 10 running batches were 0045, 0047, 0050, 0052-0058 and pending batches were the remaining 12 highest-numbered shards.",
+    "parse-2 was left untouched because no partial progress snapshot was provided for it."
+  ],
+  "completed_batches": [
+    43,
+    44,
+    46,
+    48,
+    49,
+    51
+  ],
+  "partial_batches": {
+    "1": 3288,
+    "2": 3138,
+    "3": 1655,
+    "4": 1139,
+    "5": 1054,
+    "6": 1853,
+    "7": 1845,
+    "8": 1942,
+    "45": 440,
+    "47": 533,
+    "50": 729,
+    "52": 491,
+    "53": 301,
+    "54": 163,
+    "55": 391,
+    "56": 209,
+    "57": 451,
+    "58": 554
+  }
+}

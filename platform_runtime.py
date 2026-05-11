@@ -196,6 +196,76 @@ def _taskkill_process_tree(pid, force, logger=None, label="process"):
         return False
 
 
+def _windows_process_children_map():
+    if not is_windows():
+        return {}
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_ulong),
+            ("cntUsage", ctypes.c_ulong),
+            ("th32ProcessID", ctypes.c_ulong),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", ctypes.c_ulong),
+            ("cntThreads", ctypes.c_ulong),
+            ("th32ParentProcessID", ctypes.c_ulong),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_ulong),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    kernel32 = ctypes.windll.kernel32
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == INVALID_HANDLE_VALUE:
+        return {}
+
+    children = {}
+    entry = PROCESSENTRY32()
+    entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+    try:
+        has_entry = kernel32.Process32First(snapshot, ctypes.byref(entry))
+        while has_entry:
+            parent_pid = int(entry.th32ParentProcessID)
+            child_pid = int(entry.th32ProcessID)
+            children.setdefault(parent_pid, []).append(child_pid)
+            has_entry = kernel32.Process32Next(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    return children
+
+
+def terminate_child_process_trees_for_restart(logger=None, label="current-process"):
+    if not is_windows():
+        return
+
+    current_pid = os.getpid()
+    child_pids = _windows_process_children_map().get(current_pid, [])
+    if not child_pids:
+        return
+
+    if logger is not None:
+        logger.warning(
+            "Terminating %d child process tree(s) before controlled restart for %s",
+            len(child_pids),
+            label,
+        )
+
+    seen = set()
+    for child_pid in child_pids:
+        if child_pid in seen or child_pid <= 0:
+            continue
+        seen.add(child_pid)
+        _taskkill_process_tree(
+            int(child_pid),
+            force=True,
+            logger=logger,
+            label=f"{label}-child-{child_pid}",
+        )
+
+
 def terminate_process_tree(process, logger, label, timeout_seconds=10):
     if is_windows():
         pid = getattr(process, "pid", None)
@@ -290,23 +360,3 @@ def cleanup_process_tree_after_exit(process, logger, label, timeout_seconds=5):
         os.killpg(int(process.pid), signal.SIGKILL)
     except Exception:
         pass
-
-
-def terminate_current_process_tree_for_restart(logger=None, label="current-process"):
-    pid = os.getpid()
-
-    if is_windows():
-        _taskkill_process_tree(pid, force=True, logger=logger, label=label)
-        return
-
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    except Exception as exc:
-        if logger is not None:
-            logger.debug("Failed to SIGKILL current process group for %s: %s", label, exc)
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except Exception:
-            pass

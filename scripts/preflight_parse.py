@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib
 import json
 import os
@@ -24,6 +25,7 @@ from platform_runtime import (
     available_memory_gb,
     find_browser_command,
     is_linux,
+    is_windows,
     load_socket_usage,
     supports_interface_bound_downloads,
     supports_xvfb,
@@ -36,12 +38,21 @@ TCP_TARGETS = (
     ("api.vimeo.com", 443, "Vimeo API"),
     ("api.telegram.org", 443, "Telegram API"),
 )
-PROCESS_PATTERNS = (
+COMMON_PROCESS_PATTERNS = (
     "run_assigned_shards.py",
     "download_vimeo_seleniumbase_v3.py",
     "offload_downloads.py",
     "chromedriver",
-    "/opt/google/chrome/chrome",
+)
+POSIX_PROCESS_PATTERNS = COMMON_PROCESS_PATTERNS + (
+    "google-chrome",
+    "chromium",
+    "msedge",
+)
+WINDOWS_PROCESS_PATTERNS = COMMON_PROCESS_PATTERNS + (
+    "chrome.exe",
+    "msedge.exe",
+    "chromedriver.exe",
 )
 
 
@@ -314,31 +325,6 @@ def curl_interface_head(interface_name, url, timeout=10):
     if stdout and stdout != "000":
         return True, f"http={stdout}"
     return False, "no HTTP response"
-
-
-def read_sockstat():
-    counters = {}
-    for path in ("/proc/net/sockstat", "/proc/net/sockstat6"):
-        file_path = Path(path)
-        if not file_path.exists():
-            continue
-        with open(file_path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line or ":" not in line:
-                    continue
-                proto, payload = line.split(":", 1)
-                values = payload.split()
-                for index in range(0, len(values) - 1, 2):
-                    key = values[index]
-                    try:
-                        value = int(values[index + 1])
-                    except ValueError:
-                        continue
-                    counters[f"{proto.strip().lower()}_{key.lower()}"] = (
-                        counters.get(f"{proto.strip().lower()}_{key.lower()}", 0) + value
-                    )
-    return counters
 
 
 def format_gb(value):
@@ -623,11 +609,24 @@ def check_system_state(config, args, reporter):
 
 def check_processes(reporter):
     reporter.section("Processes")
+    if is_windows():
+        matches, detail = find_windows_process_matches()
+        if matches is None:
+            reporter.warn("process scan", detail or "Windows process scan unavailable")
+            return
+        if matches:
+            reporter.warn("existing parse processes", f"{len(matches)} found")
+            for line in matches[:5]:
+                print(f"      {line}")
+        else:
+            reporter.pass_("existing parse processes", "none")
+        return
+
     pgrep_binary = shutil.which("pgrep")
     if not pgrep_binary:
         reporter.warn("pgrep", "not found")
         return
-    rc, stdout, stderr = run_command([pgrep_binary, "-af", "|".join(PROCESS_PATTERNS)], timeout=10)
+    rc, stdout, stderr = run_command([pgrep_binary, "-af", "|".join(POSIX_PROCESS_PATTERNS)], timeout=10)
     if rc == 0 and stdout:
         lines = stdout.splitlines()
         reporter.warn("existing parse processes", f"{len(lines)} found")
@@ -635,6 +634,69 @@ def check_processes(reporter):
             print(f"      {line}")
     else:
         reporter.pass_("existing parse processes", "none")
+
+
+def find_windows_process_matches():
+    powershell_binary = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell_binary:
+        command = [
+            powershell_binary,
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress",
+        ]
+        try:
+            rc, stdout, stderr = run_command(command, timeout=20)
+        except Exception as exc:
+            return None, f"PowerShell process scan failed: {exc}"
+        if rc == 0 and stdout:
+            try:
+                payload = json.loads(stdout)
+            except Exception as exc:
+                return None, f"PowerShell process scan returned invalid JSON: {exc}"
+            items = payload if isinstance(payload, list) else [payload]
+            matches = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                pid = item.get("ProcessId")
+                name = str(item.get("Name") or "")
+                command_line = str(item.get("CommandLine") or "")
+                haystack = f"{name} {command_line}".lower()
+                if any(pattern.lower() in haystack for pattern in WINDOWS_PROCESS_PATTERNS):
+                    compact_command_line = " ".join(command_line.split())
+                    if len(compact_command_line) > 180:
+                        compact_command_line = compact_command_line[:177] + "..."
+                    matches.append(f"{pid} {name} {compact_command_line}".strip())
+            return matches, None
+
+    tasklist_binary = shutil.which("tasklist")
+    if not tasklist_binary:
+        return None, "powershell/pwsh and tasklist are not available"
+
+    try:
+        rc, stdout, stderr = run_command([tasklist_binary, "/FO", "CSV", "/NH"], timeout=15)
+    except Exception as exc:
+        return None, f"tasklist process scan failed: {exc}"
+    if rc != 0:
+        return None, stderr or stdout or "tasklist failed"
+
+    matches = []
+    reader = csv.reader(stdout.splitlines())
+    for row in reader:
+        if len(row) < 2:
+            continue
+        image_name = str(row[0] or "")
+        pid = str(row[1] or "")
+        if any(
+            pattern.lower() in image_name.lower()
+            for pattern in ("chrome.exe", "msedge.exe", "chromedriver.exe", "chromedriver")
+        ):
+            matches.append(f"{pid} {image_name}")
+
+    if matches:
+        return matches, "tasklist fallback matched browser processes only"
+    return [], None
 
 
 def main():

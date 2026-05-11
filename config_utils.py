@@ -4,10 +4,23 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 
+WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def looks_like_windows_absolute_path(value):
+    text = str(value or "").strip()
+    return text.startswith("\\\\") or text.startswith("//") or bool(
+        WINDOWS_DRIVE_PATH_RE.match(text)
+    )
+
+
 def resolve_path(config_dir, value):
+    if looks_like_windows_absolute_path(value):
+        return Path(str(value))
     path = Path(value)
     if path.is_absolute():
         return path

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import subprocess
 import sys
 import time
@@ -632,6 +633,29 @@ def next_pending_batch(state):
     return None
 
 
+def stop_active_workers(active_processes, state, slot_summaries, worker_slots_root, logger, reason):
+    for slot_name, item in list(active_processes.items()):
+        batch_number = int(item["batch_number"])
+        logger.warning(
+            "Stopping active %s batch %04d (%s)",
+            slot_name,
+            batch_number,
+            reason,
+        )
+        terminate_process_tree(item["process"], logger, slot_name)
+        pending_state_item = state["items"][str(batch_number)]
+        pending_state_item["status"] = "pending"
+        pending_state_item["assigned_worker"] = None
+        pending_state_item["finished_at"] = now_string()
+        pending_state_item["exit_code"] = None
+        slot_summaries[slot_name]["active_batch_number"] = None
+        save_worker_slot_summary(
+            worker_slots_root / f"worker_{item['worker_index']:02d}",
+            slot_summaries[slot_name],
+        )
+        del active_processes[slot_name]
+
+
 def build_progress_lines(state, global_results, active_processes, master_config, logger=None):
     snapshot = build_progress_snapshot(global_results, active_processes)
     counts = snapshot["counts"]
@@ -700,6 +724,10 @@ def main():
 
     worker_count = args.workers or int(master_config.get("workers", {}).get("count", 1))
     worker_count = max(1, min(worker_count, len(selected_batches)))
+    stagger_start_seconds = max(
+        0,
+        int(master_config.get("workers", {}).get("stagger_start_seconds", 0) or 0),
+    )
 
     logs_root = Path(master_config["files"]["logs_dir"])
     workers_root = logs_root / "workers"
@@ -759,8 +787,51 @@ def main():
     exit_code = 0
     last_progress_ts = 0.0
     last_socket_pressure_log_ts = 0.0
+    interrupt_requested = False
+    interrupt_handled = False
+    previous_sigint_handler = None
+
+    def handle_sigint(signum, frame):
+        nonlocal interrupt_requested
+        interrupt_requested = True
+
+    try:
+        previous_sigint_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, handle_sigint)
+    except Exception:
+        previous_sigint_handler = None
 
     while True:
+        if interrupt_requested:
+            exit_code = 130
+            stop_requested = True
+            if not interrupt_handled:
+                interrupt_handled = True
+                logger.warning(
+                    "KeyboardInterrupt received; stopping active workers and preserving resume state"
+                )
+                if telegram.notify_on_error:
+                    telegram.notify_custom(
+                        "Assignment queue interrupted",
+                        [
+                            f"server: <code>{assignment['server_name']}</code>",
+                            f"workers_stopped: <code>{len(active_processes)}</code>",
+                            "action: <code>active workers terminated, running batches reset to pending</code>",
+                        ],
+                    )
+                stop_active_workers(
+                    active_processes,
+                    state,
+                    slot_summaries,
+                    worker_slots_root,
+                    logger,
+                    "keyboard interrupt",
+                )
+                save_assignment_state(state_path, state)
+            if not active_processes:
+                break
+            continue
+
         if not stop_requested:
             for slot_index in range(1, worker_count + 1):
                 slot_name = f"worker-{slot_index:02d}"
@@ -837,6 +908,12 @@ def main():
                 slot_summaries[slot_name]["active_batch_number"] = batch_number
                 save_worker_slot_summary(worker_slots_root / f"worker_{slot_index:02d}", slot_summaries[slot_name])
                 save_assignment_state(state_path, state)
+                if stagger_start_seconds > 0 and next_pending_batch(state) is not None:
+                    logger.info(
+                        "Staggering worker start for %ds before launching the next slot",
+                        stagger_start_seconds,
+                    )
+                    time.sleep(stagger_start_seconds)
 
         if not active_processes:
             pending_left = next_pending_batch(state)
@@ -1009,22 +1086,14 @@ def main():
             del active_processes[slot_name]
 
             if stop_requested:
-                for other_slot_name, other_item in list(active_processes.items()):
-                    logger.warning(
-                        "Stopping active %s batch %04d because stop_on_batch_error is enabled",
-                        other_slot_name,
-                        int(other_item["batch_number"]),
-                    )
-                    terminate_process_tree(other_item["process"], logger, other_slot_name)
-                    pending_state_item = state["items"][str(other_item["batch_number"])]
-                    pending_state_item["status"] = "pending"
-                    pending_state_item["assigned_worker"] = None
-                    slot_summaries[other_slot_name]["active_batch_number"] = None
-                    save_worker_slot_summary(
-                        worker_slots_root / f"worker_{other_item['worker_index']:02d}",
-                        slot_summaries[other_slot_name],
-                    )
-                    del active_processes[other_slot_name]
+                stop_active_workers(
+                    active_processes,
+                    state,
+                    slot_summaries,
+                    worker_slots_root,
+                    logger,
+                    "stop_on_batch_error is enabled",
+                )
                 save_assignment_state(state_path, state)
                 break
 
@@ -1081,6 +1150,11 @@ def main():
         wait=True,
     )
     telegram.shutdown(timeout=10)
+    if previous_sigint_handler is not None:
+        try:
+            signal.signal(signal.SIGINT, previous_sigint_handler)
+        except Exception:
+            pass
     return exit_code
 
 

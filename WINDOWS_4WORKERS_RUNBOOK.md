@@ -25,6 +25,9 @@
 - `workers.count = 4`
 - `workers.restart_after_processed = 100`
 - `workers.consecutive_timeout_failures_before_restart = 2`
+- Windows watchdog tightened for hung browser cases:
+  - `stall_alert_after_seconds = 600`
+  - `stall_exit_after_seconds = 900`
 - `runtime.vimeo_authenticated_session = true`
 - `vimeo_login` уже заполнен в tracked `config.json`
 - `workers.api_pool` уже заполнен в tracked `config.json`; при `workers.count = 4` используются первые 4 slot-а
@@ -39,6 +42,7 @@
 5. Создать venv и установить зависимости:
 
 ```powershell
+$env:PYTHONIOENCODING = "utf-8"
 py -3.13 -m venv venv
 venv\Scripts\python -m pip install --upgrade pip
 venv\Scripts\python -m pip install -r requirements.txt
@@ -69,6 +73,7 @@ venv\Scripts\python download_vimeo_seleniumbase_v3.py --config config.windows.4w
 - хватает свободного места под `output/runs/windows-4workers`
 - Telegram не привязан к Linux-only source IP
 - при первых 20-50 URL нет массовых зависаний браузера
+- при остановке coordinator через `Ctrl+C` batch-и должны вернуться в `pending`, но `chrome.exe` / `chromedriver.exe` всё равно стоит быстро проверить вручную
 
 ## Рекомендации по Windows start profile
 

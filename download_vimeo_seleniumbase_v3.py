@@ -25,7 +25,7 @@ from config_utils import load_json_config_with_optional_secrets, resolve_path
 from platform_runtime import (
     is_windows,
     load_socket_usage,
-    terminate_current_process_tree_for_restart,
+    terminate_child_process_trees_for_restart,
     supports_interface_bound_downloads,
     supports_xvfb,
 )
@@ -254,7 +254,7 @@ def setup_logger(log_file):
     logger.propagate = False
 
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    file_handler = logging.FileHandler(log_path)
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(formatter)
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
@@ -412,7 +412,7 @@ class ActivityWatchdog(threading.Thread):
                     ],
                 )
                 self.telegram.shutdown(timeout=5)
-                terminate_current_process_tree_for_restart(
+                terminate_child_process_trees_for_restart(
                     logger=self.logger,
                     label=f"worker-stall-{snapshot['worker_name'] or 'unknown'}",
                 )
@@ -2761,6 +2761,11 @@ def main():
     controlled_restart_reason = None
     login_email = None
     login_password = None
+    api_401_fallback_enabled = bool(
+        config["settings"].get("api_401_fallback_to_page", False)
+    )
+    api_disabled_after_auth_error = False
+    api_disabled_banner_logged = False
     download_session = build_download_http_session(config)
     consecutive_timeout_failures = 0
 
@@ -2911,47 +2916,69 @@ def main():
                     logger.info("%s", "=" * 80)
 
                     response = None
+                    api_payload = {}
+                    api_probe = build_api_probe(None, None)
+                    result = create_placeholder_result()
                     try:
-                        wait_for_socket_budget(
-                            config,
-                            logger,
-                            stage="api_request",
-                            video_id=video_id,
-                        )
-                        logger.info("Checking video %s via API...", video_id)
-                        response = get_vimeo_api_video(api_session, video_id, config)
-                        api_payload = api_error_payload(response)
-                        api_probe = build_api_probe(response.status_code, api_payload)
-                        result = create_placeholder_result()
-
-                        if response.status_code == 401:
-                            fatal_error = "API Authentication error (401) - invalid token"
-                            logger.error(fatal_error)
-                            metadata_path = save_video_metadata(
+                        if api_disabled_after_auth_error:
+                            if not api_disabled_banner_logged:
+                                logger.warning(
+                                    "Vimeo API disabled for this worker after prior 401; continuing in page-probe mode"
+                                )
+                                api_disabled_banner_logged = True
+                        else:
+                            wait_for_socket_budget(
                                 config,
-                                video_dir,
-                                video_id,
-                                video_url,
-                                None,
-                                api_probe,
-                                result,
-                                "failed",
-                                "fatal_api_401 invalid token",
+                                logger,
+                                stage="api_request",
+                                video_id=video_id,
                             )
-                            update_results_manifest(
-                                results_manifest,
-                                i,
-                                status="failed",
-                                reason="fatal_api_401 invalid token",
-                                metadata_json=str(metadata_path),
-                                storage_bucket=get_metadata_bucket("failed", result=result),
-                            )
-                            save_results_manifest(config, results_manifest)
-                            telegram.notify_api_error(401, "Invalid API token")
-                            exit_code = 2
-                            break
+                            logger.info("Checking video %s via API...", video_id)
+                            response = get_vimeo_api_video(api_session, video_id, config)
+                            api_payload = api_error_payload(response)
+                            api_probe = build_api_probe(response.status_code, api_payload)
 
-                        if response.status_code == 429:
+                        if response is not None and response.status_code == 401:
+                            if api_401_fallback_enabled:
+                                api_disabled_after_auth_error = True
+                                api_disabled_banner_logged = True
+                                api_payload = {}
+                                logger.warning(
+                                    "Vimeo API returned 401 for %s; disabling API for this worker and falling back to page probe",
+                                    video_id,
+                                )
+                                telegram.notify_api_error(
+                                    401,
+                                    "Worker API token returned 401. Switching this worker to page-probe mode.",
+                                )
+                            else:
+                                fatal_error = "API Authentication error (401) - invalid token"
+                                logger.error(fatal_error)
+                                metadata_path = save_video_metadata(
+                                    config,
+                                    video_dir,
+                                    video_id,
+                                    video_url,
+                                    None,
+                                    api_probe,
+                                    result,
+                                    "failed",
+                                    "fatal_api_401 invalid token",
+                                )
+                                update_results_manifest(
+                                    results_manifest,
+                                    i,
+                                    status="failed",
+                                    reason="fatal_api_401 invalid token",
+                                    metadata_json=str(metadata_path),
+                                    storage_bucket=get_metadata_bucket("failed", result=result),
+                                )
+                                save_results_manifest(config, results_manifest)
+                                telegram.notify_api_error(401, "Invalid API token")
+                                exit_code = 2
+                                break
+
+                        if response is not None and response.status_code == 429:
                             fatal_error = "API rate limit exceeded (429)"
                             logger.error(fatal_error)
                             metadata_path = save_video_metadata(
@@ -2982,7 +3009,7 @@ def main():
                             exit_code = 3
                             break
 
-                        if response.status_code == 403:
+                        if response is not None and response.status_code == 403:
                             reason = "403 API error"
                             try:
                                 data = api_payload or {}
@@ -3071,7 +3098,7 @@ def main():
                                 time.sleep(delay)
                             continue
 
-                        if response.status_code == 404:
+                        if response is not None and response.status_code == 404:
                             logger.info("Video %s not found (404), skipping", video_id)
                             skipped_videos += 1
                             runtime_state.update_counts(
