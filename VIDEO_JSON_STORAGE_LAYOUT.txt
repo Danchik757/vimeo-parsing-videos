@@ -1,0 +1,108 @@
+VIDEO / JSON STORAGE LAYOUT
+===========================
+
+1. Рабочие директории
+---------------------
+
+Локальная рабочая директория на этой машине:
+- /Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix
+
+Типовая рабочая директория на сервере для production run:
+- /29d_kon/projects/vimeo-parsing-videos
+
+Текущий локальный профиль parse-3 в репозитории указывает:
+- videos_dir: /Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/output/runs/parse-3/videos
+- logs_dir: /Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/output/runs/parse-3
+- storage_root: /29d_kon/mount/mimas/vimeo/2025scraped/parse-3
+
+Типовой production run parse-1 на сервере:
+- run root: /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1
+- storage root: /home/msu_cc/mount/mimas/vimeo/2025scraped/parse-1
+
+
+2. Что лежит локально рядом с каждым скачанным видео
+----------------------------------------------------
+
+Для успешно скачанного видео используется per-video layout:
+
+- /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/videos/downloaded/<video_id>/
+  или локально по той же схеме:
+- /Users/admin/Documents/LAB/CODECS/4k/Parse/codex_vimeo_fix/output/runs/parse-3/videos/downloaded/<video_id>/
+
+Обычно внутри каталога <video_id> лежит:
+- сам видеофайл, обычно .mp4
+- <video_id>.json
+
+Временный случай во время незавершенной загрузки:
+- рядом может лежать .part файл
+- offloader такие каталоги не забирает, пока .part не исчезнет
+
+После успешного offload с delete_local_video_after_upload=true:
+- локальный .mp4 может быть удален
+- JSON обычно остается
+- в JSON фиксируется, что файл уже выгружен на хранилище
+
+
+3. Что лежит на самом хранилище
+-------------------------------
+
+На storage структура такая же, тоже per-video directory:
+
+- /home/msu_cc/mount/mimas/vimeo/2025scraped/parse-1/downloaded/<video_id>/
+
+Внутри обычно лежит:
+- видеофайл, например <video_id>.mp4 или имя, пришедшее от Vimeo
+- <video_id>.json
+
+То есть на storage рядом с каждым видео лежит его JSON-описание. Отдельные batch-логи туда не копируются.
+
+
+4. Коротко про видеофайл
+------------------------
+
+Видео-файл это фактический скачанный media asset из Vimeo:
+- обычно Original quality
+- обычно mp4
+- это тот файл, который затем переносится offloader-ом на хранилище
+
+
+5. Коротко про JSON рядом с видео
+---------------------------------
+
+JSON это карточка состояния и метаданных именно для этого video_id. В нем обычно есть:
+- _video_id и _video_url
+- _download: статус, причина, filename, file_path, file_size_mb, source, selected_quality, is_original
+- _api: что вернул Vimeo API по download options
+- _page_probe: что было найдено на странице Vimeo
+- _storage: локальный bucket и путь metadata
+- _offload: статус выгрузки, remote_video_file, remote_metadata_json, uploaded_at, local_video_deleted
+- vimeo_video: либо полный payload Vimeo API, либо компактная сводка
+
+Практический смысл JSON:
+- по нему можно понять, скачан ли ролик
+- был ли он выгружен на storage
+- какой quality выбрал downloader
+- откуда был взят download link
+- почему ролик был skipped или failed
+
+
+6. Где лежат JSON для нескачанных видео
+---------------------------------------
+
+Если ролик downloadable, но Original не найден или скачивание не выполнено:
+- /29d_kon/projects/vimeo-parsing-videos/output/runs/parse-1/videos/not_downloaded/<video_id>.json
+
+Если usable link вообще не найден:
+- URL записывается в workers/no_links_urls.txt
+- отдельного per-video JSON может не быть
+
+
+7. Важное отличие
+-----------------
+
+В текущем layout JSON для скачанного ролика лежит рядом с видео в каталоге этого video_id.
+То есть для downloaded-кейса основная пара файлов это:
+- <video file>
+- <video_id>.json
+
+Именно эту пару offloader переносит на storage и отражает в поле _offload.

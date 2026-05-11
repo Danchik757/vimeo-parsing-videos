@@ -1,0 +1,162 @@
+{
+  "vimeo_api": {
+    "token": "b2f0ac71f0016aac1707a4946415c399",
+    "secret": "Zj40iPxurL3pR/i6cKXUvBj3oabe3tF+IYniIGjq59sHjUUPAd9Maf16uHIg2TawweOOCI1pLh4/2y8gMqT8ZU/plwdONvLfFKvLxi+K17ioScjv4q2F/5HbaUXSWq5M",
+    "client_id": "2f50599f21d76450c218dcc3631a1752f9f05b8b"
+  },
+  "vimeo_login": {
+    "email": "greed2051@gmail.com",
+    "password": "Vimeo098#"
+  },
+  "proxy": {
+    "enabled": false,
+    "host": "185.88.101.106",
+    "port": "3128",
+    "username": "subject",
+    "password": "XnglxoA4WDUv02wuMksvtA"
+  },
+  "files": {
+    "source_json": "/Users/admin/Documents/LAB/CODECS/4k/Parse/original/need_parse_unique.json",
+    "videos_dir": "output/runs/first50_original_20260313/videos",
+    "jsons_dir": "output/runs/first50_original_20260313/jsons",
+    "logs_dir": "output/runs/first50_original_20260313",
+    "failed_downloads": "output/runs/first50_original_20260313/failed_downloads.json",
+    "log_file": "output/runs/first50_original_20260313/download.log",
+    "summary_file": "output/runs/first50_original_20260313/summary.json",
+    "results_file": "output/runs/first50_original_20260313/results_manifest.json"
+  },
+  "telegram": {
+    "enabled": true,
+    "bot_token": "8663411286:AAEVovx8KDfbWjTvixlYIOi8Wk_auLPnh-U",
+    "chat_id": "-1003778922016",
+    "notify_download_every_n_successes": 5,
+    "notify_skip_every_n_processed": 0,
+    "notify_progress_every_n_processed": 25,
+    "notify_progress_min_interval_seconds": 300,
+    "notify_on_start": true,
+    "notify_on_finish": true,
+    "notify_on_error": true,
+    "notify_on_ip_block": true,
+    "notify_on_stall": true,
+    "notify_on_heartbeat": true
+  },
+  "settings": {
+    "test_mode": true,
+    "test_limit": 50,
+    "retry_attempts": 3,
+    "retry_delay": 5,
+    "javascript_wait_time": 15,
+    "download_timeout": 600,
+    "connect_timeout": 30,
+    "download_chunk_size_kb": 1024,
+    "download_progress_log_seconds": 15
+  },
+  "browser": {
+    "uc": true,
+    "headless": false,
+    "xvfb": false,
+    "disable_csp": true,
+    "block_images": false,
+    "incognito": false,
+    "chromium_arg": "--disable-blink-features=AutomationControlled"
+  },
+  "runtime": {
+    "job_name": "Vimeo Downloader",
+    "worker_name": "worker-01",
+    "worker_index": 1,
+    "worker_count": 1
+  },
+  "watchdog": {
+    "enabled": true,
+    "stall_alert_after_seconds": 1800,
+    "repeat_alert_every_seconds": 1800,
+    "heartbeat_every_seconds": 900
+  },
+  "resume": {
+    "enabled": true,
+    "state_file": "output/runs/first50_original_20260313/resume_state.json",
+    "skip_completed_files": true,
+    "resume_partial_downloads": true
+  },
+  "workers": {
+    "count": 2,
+    "stagger_start_seconds": 3,
+    "api_pool": [
+      {
+        "client_id": "fa373f86a8837d0f725ff707a837c64d01a66b6f",
+        "client_secret": "jkI//+33NTYm9jhcj6i5o78wYbCrP6DCKm3O2iLYmeOD1elt3jo3cZbDavlDD1aEjmyfPhIXuttwlVb6IEIg4soy9f0jYzI8oY2FCIGTfP8XXT7aKXHowSadKVlO29iq",
+        "token": "4d2107b481617733af959a9c75e76129"
+      },
+      {
+        "client_id": "f10eeed4fa9872bbb208dca1ad66c400a8bed829",
+        "client_secret": "8ELxmyBCoK8dVNWxm5LuqIQljR3F0bxNfD2qjbhWXqlaw3PYE/tfgOzeNfJKfwjaoQAUHv199j+hGq0p1pDLTSOQHQxvaaee4eADgaFDyn0LAVnvN8GV5ZUpcwQCSZyp",
+        "token": "2abdea5288400745e5498afae98c587c"
+      },
+      {
+        "client_id": "045b89cda0880739f4360ebef3b9e5d3b0279a1f",
+        "client_secret": "p2Sz8YenlYnqu/wNyTIDyD4HeziLfwiCYGKAJez/6UBrg65CTCBuY10Q+xlwZJFIB9J6pv3xxQFYOo+Jz6KLAEPnIsEKCbBFrAnN5qKnGEakBL4tqViLIvFIvSGpolQg",
+        "token": "7b5e5fe3de65e65580758fe3ebbb3227"
+      },
+      {
+        "client_id": "6b47ba0f5964f1acf25cbe3f6d45aa4308fefa11",
+        "client_secret": "3IljpccafhnjLDoaiZG7JeMifyAENVt9nGUwPfWFhQNjbfbDze2V4GUtjk0vai31Y10Ko0tNiniWdljUfP+lXT+mWeml2wbSJsx6cYN4QlP5oq2OBcfVDGKHG5d9FR9O",
+        "token": "001746aeb98a3d9415f64131b5156af3"
+      },
+      {
+        "client_id": "b2bbac529c3162a8e891b50d66ce7aa46d40c0bb",
+        "client_secret": "GPISPaxGJS86xH1/73G0LWTdeTH/uatMf06nMQaqtoREzX6xzyFJ9ap6r781qIEtukAACg2ZcNnKD51nRf2RLkRTxO91TyD/Dl0yPSy6zC4wWV0mijx+5hgEp1BUFF9t",
+        "token": "cd00dea4b8739710a57d107966142090"
+      },
+      {
+        "client_id": "e8244e7edfaf035233c758d92b0a5c5ee9f05579",
+        "client_secret": "C9Yy1Qk53OHx5F3ja85vnnZTGkx4iJyaHacuou1p5EhxhDEfevFJm92zf7TTJVSs0i+cnkRVToTergbbnhgg9tzO2jxOnWqDRG8Q9LK5ZYsuzzIdjsvtXDwM00Yq1+3c",
+        "token": "ae4b0123f1b16ffc1dec442207307042"
+      },
+      {
+        "client_id": "14e228be23876b29afb05c578458f89bee06cf10",
+        "client_secret": "6nf73V/z8lf7ie/endZHIS5I6r/qhQsGJt1fehZiuq8ceRN4TH7fWDhqyS1ziH6u2NdRHBw5f9BR4OhLXLxVmxNesd/y0pjpZs94RXlKgqLKsnTOYRiBv707+zA+1QIT",
+        "token": "4acf9b21849acc501f531cde90e20662"
+      },
+      {
+        "client_id": "872bde0b5a401034692cb198cff6428cdc4ca2a4",
+        "client_secret": "dpIe185zz8BAk8uj6btJ5yZzxlM0nygiTSW6FmFSiBGth5GhOUDQGvglSnv0j5wTL5D/hJdEapFtuQl7AKSLy18VBJTaYIAj0B1Hq0VrbByhiRvfRmyurCsRA1tGcq0n",
+        "token": "4a8eaaf721a5de1750f853852ff589fa"
+      },
+      {
+        "client_id": "00f2c723eeb35cb4434f37442e57c455d952b82f",
+        "client_secret": "4njN3a3xTEDmzHDkrZcQePHOWTwlyR3mq8JxBFdaXHupLQC9C0BuFkKkVvfb0knllMZEQpRHhfJ/XcUDZBNIWH5Ds+hskARRgA0I2OSlo8CIVgW1s3U6xH3xFuCqPvMf",
+        "token": "0e284f7446ff08ef0a4ff675b36eea9e"
+      },
+      {
+        "client_id": "b35421bce127082f2392ef95768ee01365462de3",
+        "client_secret": "8x6pWnKFO76k4tucqhNeS+cPQoaoTMQX8lhqMpBBcSrGYlF0NyLR/Yq0M2skS7sYd+vVse22b8mwRH//GPdxTOBaSxXir3C1vBXTZ3ovs+vXDbQKGZMQOqvNL6Wh+ti7",
+        "token": "21f3d98512ecb48d19de05fefa67d6bc"
+      },
+      {
+        "client_id": "090b867453fcd796562f290e3a1117ac5e924588",
+        "client_secret": "Z7g7fUd8OdNCM4aNL3AieGyeMcBa6xQdH9M6Zx71KYYFXT7AR7HEMqz6XX0XfJqQEboGWoONKMSXl6zYor6cjhvL6t9n7mCxY8A0ws0tXwc/6jlhJA7E1Lf6SPiLNQ3A",
+        "token": "4f332f0269b4028193ea741399e52fd5"
+      },
+      {
+        "client_id": "c1d6112543c08c7dd986dae1e2977f7fea47e30b",
+        "client_secret": "PxGTyVPSp7E572Aq1yPps031A1xkJLqTqJF0cHSpluv4s0JQyWEMIzqHFMhnY3TM9ToEDSsZIvM2DZ73irnPPA+JvPGNXWeu+d0WHNE5fuVBCikdUplyM6OTsbuRLpUn",
+        "token": "d7e5658bd1b53bf240dffeb09955d8b0"
+      },
+      {
+        "client_id": "ce103f954c0f65039e679ccb9d457dcc89a9be8c",
+        "client_secret": "2MYXkJSnLSFWCHXfS+qYQUfRQLfuh6/O1PkhQFOZcRdP5XwClLaoRvsG1Mu/K6N/AqtMTmSJPmkSKOicmLnp0lB+WGok82Y4qpjNNTbPI2KQVBPAvLwWceoixQEAhwUB",
+        "token": "dbc38c199cf7f3e3c7f167f9b3462c46"
+      },
+      {
+        "client_id": "2fd9ce71c9bd2f9bfc286311ed92cdd37eb6ccea",
+        "client_secret": "OU5MrM8FzE/YcUmNcm4C2Mh/b2Mri645mlgi2l3oEIYw1zWXGGeEhU28rpPXPqA+cUg8Kvh2XrjtbHaRaSzM7VEnaHs/pLsu1Yor7F+4UKj3VA3ToAOHdU53liC01Lka",
+        "token": "cb9bc93b1a40e079687984b1a671e783"
+      },
+      {
+        "client_id": "13370ab7cf24251b2aa653f1a5747c8f8b2c3933",
+        "client_secret": "sRdhlIbDLGyCaDW4asUwfvmX0T3KxOYQ+aacKxMgHSsqZf2MiFRlq0W3WcSR8PZ/60xyeyqhaXkkBSe3C8ChvQN4z17H/xqtqkHhEMHAqnAEjwBKoU1H0bWeVZQdio6p",
+        "token": "e444ca8c9b714353e89146363bfe8429"
+      }
+    ]
+  }
+}

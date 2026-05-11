@@ -20,9 +20,17 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config_utils import load_json_config_with_optional_secrets, resolve_path
+from platform_runtime import (
+    available_memory_gb,
+    find_browser_command,
+    is_linux,
+    load_socket_usage,
+    supports_interface_bound_downloads,
+    supports_xvfb,
+)
 
 
-REQUIRED_PYTHON_MODULES = ("requests", "vimeo", "seleniumbase")
+REQUIRED_PYTHON_MODULES = ("requests", "seleniumbase")
 TCP_TARGETS = (
     ("github.com", 443, "GitHub HTTPS"),
     ("api.vimeo.com", 443, "Vimeo API"),
@@ -333,39 +341,8 @@ def read_sockstat():
     return counters
 
 
-def available_memory_gb():
-    meminfo = Path("/proc/meminfo")
-    if not meminfo.exists():
-        return None
-    values = {}
-    with open(meminfo, "r", encoding="utf-8") as handle:
-        for line in handle:
-            if ":" not in line:
-                continue
-            key, payload = line.split(":", 1)
-            values[key.strip()] = payload.strip()
-    available = values.get("MemAvailable")
-    if not available:
-        return None
-    parts = available.split()
-    if not parts:
-        return None
-    try:
-        kb = int(parts[0])
-    except ValueError:
-        return None
-    return kb / 1024 / 1024
-
-
 def format_gb(value):
     return f"{value:.1f} GB"
-
-
-def browser_command():
-    for command in ("google-chrome", "chromium", "chromium-browser"):
-        if shutil.which(command):
-            return command
-    return None
 
 
 def import_python_modules(reporter):
@@ -400,25 +377,40 @@ def check_git(reporter):
 
 def check_tools(config, reporter):
     reporter.section("Tools")
-    for tool in ("curl", "ip", "tmux"):
+    for tool in ("curl", "git"):
         if shutil.which(tool):
             reporter.pass_(f"tool {tool}")
         else:
             reporter.fail(f"tool {tool}", "not found")
 
-    if browser_command():
-        reporter.pass_("browser", browser_command())
-    else:
-        reporter.fail("browser", "google-chrome/chromium not found")
+    if is_linux():
+        for tool in ("ip", "tmux"):
+            if shutil.which(tool):
+                reporter.pass_(f"tool {tool}")
+            else:
+                reporter.fail(f"tool {tool}", "not found")
 
-    if config.get("browser", {}).get("xvfb"):
+    browser_cmd = find_browser_command()
+    if browser_cmd:
+        reporter.pass_("browser", browser_cmd)
+    else:
+        reporter.fail("browser", "Chrome/Chromium/Edge not found")
+
+    if config.get("browser", {}).get("xvfb") and supports_xvfb():
         if shutil.which("xvfb-run"):
             reporter.pass_("xvfb-run")
         else:
             reporter.fail("xvfb-run", "required because browser.xvfb=true")
+    elif config.get("browser", {}).get("xvfb"):
+        reporter.warn("xvfb-run", "browser.xvfb=true but this platform does not support xvfb")
 
     if config.get("settings", {}).get("download_interface"):
-        if shutil.which("curl"):
+        if not supports_interface_bound_downloads():
+            reporter.fail(
+                "curl for interface-bound downloads",
+                "download_interface is configured but this platform does not support interface-bound downloads yet",
+            )
+        elif shutil.which("curl"):
             reporter.pass_("curl for interface-bound downloads")
         else:
             reporter.fail("curl for interface-bound downloads", "settings.download_interface is set")
@@ -454,6 +446,17 @@ def check_config_and_paths(config, args, reporter):
                 reporter.pass_(f"telegram.{key}")
             else:
                 reporter.fail(f"telegram.{key}", "missing")
+
+    if bool(config.get("runtime", {}).get("vimeo_authenticated_session", False)):
+        login_cfg = config.get("vimeo_login", {})
+        for key in ("email", "password"):
+            if str(login_cfg.get(key, "")).strip():
+                reporter.pass_(f"vimeo_login.{key}")
+            else:
+                reporter.fail(
+                    f"vimeo_login.{key}",
+                    "required because runtime.vimeo_authenticated_session=true",
+                )
 
     files_cfg = config.get("files", {})
     source_json = files_cfg.get("source_json")
@@ -527,8 +530,13 @@ def check_interfaces_and_network(config, reporter):
         iface = get_interface_for_source_ip(source_address)
         if iface:
             reporter.pass_("telegram source_address", f"{source_address} on {iface}")
-        else:
+        elif is_linux():
             reporter.fail("telegram source_address", f"local IP not found: {source_address}")
+        else:
+            reporter.warn(
+                "telegram source_address",
+                f"configured as {source_address}; interface lookup is Linux-only in current preflight",
+            )
         ok, detail = tcp_connect("api.telegram.org", 443, timeout=5, source_address=source_address)
         if ok:
             reporter.pass_("telegram source TCP bind", source_address)
@@ -537,6 +545,12 @@ def check_interfaces_and_network(config, reporter):
 
     download_interface = str(config.get("settings", {}).get("download_interface", "")).strip()
     if download_interface:
+        if not supports_interface_bound_downloads():
+            reporter.fail(
+                "download interface",
+                "configured but interface-bound routing is not implemented for this platform yet",
+            )
+            return
         ok, detail = check_interface_state(download_interface)
         if ok:
             reporter.pass_("download interface", detail)
@@ -579,30 +593,32 @@ def check_system_state(config, args, reporter):
 
     mem_available_gb = available_memory_gb()
     if mem_available_gb is None:
-        reporter.warn("memory", "MemAvailable not readable")
+        reporter.warn("memory", "available memory metric is not readable on this platform")
     elif mem_available_gb < args.min_mem_free_gb:
         reporter.warn("memory", format_gb(mem_available_gb))
     else:
         reporter.pass_("memory", format_gb(mem_available_gb))
 
-    sockstat = read_sockstat()
-    if sockstat:
+    socket_usage = load_socket_usage()
+    if socket_usage:
         reporter.pass_(
             "sockets",
             "used={used} tcp_inuse={tcp_inuse} tcp_tw={tcp_tw} tcp_orphan={tcp_orphan} tcp_alloc={tcp_alloc}".format(
-                used=sockstat.get("sockets_used", 0),
-                tcp_inuse=sockstat.get("tcp_inuse", 0),
-                tcp_tw=sockstat.get("tcp_tw", 0),
-                tcp_orphan=sockstat.get("tcp_orphan", 0),
-                tcp_alloc=sockstat.get("tcp_alloc", 0),
+                used=socket_usage.get("sockets_used", 0),
+                tcp_inuse=socket_usage.get("tcp_inuse", 0),
+                tcp_tw=socket_usage.get("tcp_timewait", 0),
+                tcp_orphan=socket_usage.get("tcp_orphan", 0),
+                tcp_alloc=socket_usage.get("tcp_alloc", 0),
             ),
         )
-        if sockstat.get("tcp_tw", 0) > 512:
-            reporter.warn("tcp timewait", str(sockstat.get("tcp_tw", 0)))
-        if sockstat.get("tcp_orphan", 0) > 32:
-            reporter.warn("tcp orphan", str(sockstat.get("tcp_orphan", 0)))
-        if sockstat.get("tcp_alloc", 0) > 2048:
-            reporter.warn("tcp alloc", str(sockstat.get("tcp_alloc", 0)))
+        if socket_usage.get("tcp_timewait", 0) > 512:
+            reporter.warn("tcp timewait", str(socket_usage.get("tcp_timewait", 0)))
+        if socket_usage.get("tcp_orphan", 0) > 32:
+            reporter.warn("tcp orphan", str(socket_usage.get("tcp_orphan", 0)))
+        if socket_usage.get("tcp_alloc", 0) > 2048:
+            reporter.warn("tcp alloc", str(socket_usage.get("tcp_alloc", 0)))
+    elif not is_linux():
+        reporter.warn("sockets", "socket pressure metrics are not implemented for this platform yet")
 
 
 def check_processes(reporter):

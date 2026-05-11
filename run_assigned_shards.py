@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import signal
 import subprocess
 import sys
 import time
@@ -16,6 +14,12 @@ from download_vimeo_seleniumbase_v3 import (
     PROJECT_ROOT,
     load_config,
     setup_logger,
+)
+from platform_runtime import (
+    cleanup_process_tree_after_exit,
+    load_socket_usage,
+    terminate_process_tree,
+    worker_popen_kwargs,
 )
 from result_exports import write_result_url_lists
 from telegram_notifier import TelegramNotifier
@@ -90,69 +94,6 @@ def load_offload_storage_usage(config, logger=None):
             continue
 
     return {"uploaded_count": uploaded_count, "total_bytes": total_bytes}
-
-
-def read_sockstat_file(path):
-    path = Path(path)
-    if not path.exists():
-        return {}
-
-    stats = {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if not line or ":" not in line:
-                    continue
-                family, tail = line.split(":", 1)
-                parts = tail.strip().split()
-                metrics = {}
-                for index in range(0, len(parts) - 1, 2):
-                    key = parts[index]
-                    value = parts[index + 1]
-                    try:
-                        metrics[key] = int(value)
-                    except ValueError:
-                        continue
-                stats[family.lower()] = metrics
-    except Exception:
-        return {}
-
-    return stats
-
-
-def load_socket_usage(logger=None):
-    sockstat = read_sockstat_file("/proc/net/sockstat")
-    sockstat6 = read_sockstat_file("/proc/net/sockstat6")
-
-    try:
-        tcp_inuse = int(sockstat.get("tcp", {}).get("inuse", 0)) + int(
-            sockstat6.get("tcp6", {}).get("inuse", 0)
-        )
-        tcp_timewait = int(sockstat.get("tcp", {}).get("tw", 0))
-        tcp_orphan = int(sockstat.get("tcp", {}).get("orphan", 0))
-        tcp_alloc = int(sockstat.get("tcp", {}).get("alloc", 0))
-        udp_inuse = int(sockstat.get("udp", {}).get("inuse", 0)) + int(
-            sockstat6.get("udp6", {}).get("inuse", 0)
-        )
-        raw_inuse = int(sockstat.get("raw", {}).get("inuse", 0)) + int(
-            sockstat6.get("raw6", {}).get("inuse", 0)
-        )
-        sockets_used = int(sockstat.get("sockets", {}).get("used", 0))
-    except Exception as exc:
-        if logger is not None:
-            logger.warning("Failed to parse socket counters: %s", exc)
-        return None
-
-    return {
-        "sockets_used": sockets_used,
-        "tcp_inuse": tcp_inuse,
-        "tcp_timewait": tcp_timewait,
-        "tcp_orphan": tcp_orphan,
-        "tcp_alloc": tcp_alloc,
-        "udp_inuse": udp_inuse,
-        "raw_inuse": raw_inuse,
-    }
 
 
 def evaluate_socket_pressure(config, logger=None):
@@ -621,6 +562,13 @@ def build_batch_worker_config(master_config, batch_dir, source_json_path, batch_
     api_pool = master_config.get("workers", {}).get("api_pool") or []
     if worker_index <= len(api_pool):
         api_creds = api_pool[worker_index - 1] or {}
+        if isinstance(api_creds.get("vimeo_api"), dict):
+            nested_api_creds = api_creds.get("vimeo_api") or {}
+            api_creds = {
+                "client_id": nested_api_creds.get("client_id"),
+                "client_secret": nested_api_creds.get("client_secret") or nested_api_creds.get("secret"),
+                "token": nested_api_creds.get("token"),
+            }
         if all(api_creds.get(key) for key in ("client_id", "client_secret", "token")):
             batch_config.setdefault("vimeo_api", {})
             batch_config["vimeo_api"]["client_id"] = api_creds["client_id"]
@@ -734,72 +682,6 @@ def build_progress_lines(state, global_results, active_processes, master_config,
             )
         )
     return lines
-
-
-def terminate_process(process, logger, label):
-    pgid = None
-    if getattr(process, "pid", None):
-        pgid = int(process.pid)
-        try:
-            os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            pgid = None
-        except Exception:
-            pgid = None
-
-    if pgid is None:
-        try:
-            process.terminate()
-        except Exception:
-            return
-
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if process.poll() is not None:
-            return
-        time.sleep(0.5)
-
-    logger.warning("Force-killing %s after terminate timeout", label)
-    if pgid is not None:
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-            return
-        except ProcessLookupError:
-            return
-        except Exception:
-            pass
-    try:
-        process.kill()
-    except Exception:
-        pass
-
-
-def cleanup_process_group_after_exit(process, logger, label):
-    if not getattr(process, "pid", None):
-        return
-    try:
-        os.killpg(int(process.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except Exception as exc:
-        logger.debug("Could not clean process group for %s: %s", label, exc)
-        return
-
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        try:
-            os.killpg(int(process.pid), 0)
-        except ProcessLookupError:
-            return
-        except Exception:
-            return
-        time.sleep(0.2)
-
-    logger.warning("Force-killing leftover process group for %s", label)
-    try:
-        os.killpg(int(process.pid), signal.SIGKILL)
-    except Exception:
-        pass
 
 
 def main():
@@ -937,7 +819,7 @@ def main():
                     cwd=str(PROJECT_ROOT),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.STDOUT,
-                    start_new_session=True,
+                    **worker_popen_kwargs(),
                 )
                 active_processes[slot_name] = {
                     "worker_name": worker_name,
@@ -984,7 +866,7 @@ def main():
                 batch_number,
                 return_code,
             )
-            cleanup_process_group_after_exit(process, logger, slot_name)
+            cleanup_process_tree_after_exit(process, logger, slot_name)
 
             state_item = state["items"][batch_key]
             state_item["finished_at"] = now_string()
@@ -1133,7 +1015,7 @@ def main():
                         other_slot_name,
                         int(other_item["batch_number"]),
                     )
-                    terminate_process(other_item["process"], logger, other_slot_name)
+                    terminate_process_tree(other_item["process"], logger, other_slot_name)
                     pending_state_item = state["items"][str(other_item["batch_number"])]
                     pending_state_item["status"] = "pending"
                     pending_state_item["assigned_worker"] = None
@@ -1194,6 +1076,7 @@ def main():
             f"downloaded_urls: <code>{exported_lists['downloaded_original']}</code>",
             f"not_downloaded_urls: <code>{exported_lists['not_downloaded_downloadable']}</code>",
             f"no_links_urls: <code>{exported_lists['no_links']}</code>",
+            f"transcript_modal_urls: <code>{exported_lists['transcript_modal']}</code>",
         ],
         wait=True,
     )

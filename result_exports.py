@@ -9,6 +9,7 @@ RESULT_LIST_FILENAMES = {
     "downloaded_original": "downloaded_original_urls.txt",
     "not_downloaded_downloadable": "not_downloaded_downloadable_urls.txt",
     "no_links": "no_links_urls.txt",
+    "transcript_modal": "transcript_modal_urls.txt",
 }
 
 
@@ -17,6 +18,7 @@ def build_result_url_lists(items):
         "downloaded_original": [],
         "not_downloaded_downloadable": [],
         "no_links": [],
+        "transcript_modal": [],
     }
 
     seen = {key: set() for key in buckets}
@@ -28,7 +30,17 @@ def build_result_url_lists(items):
 
         bucket = None
         status = item.get("status")
-        if status == "downloaded":
+        reason = str(
+            item.get("error")
+            or item.get("probe_error")
+            or item.get("policy_reason")
+            or item.get("reason")
+            or ""
+        ).strip()
+
+        if reason == "Transcript download modal opened instead of video download":
+            bucket = "transcript_modal"
+        elif status == "downloaded":
             bucket = "downloaded_original"
         elif item.get("downloadable") or item.get("download_link"):
             bucket = "not_downloaded_downloadable"

@@ -1,0 +1,120 @@
+{
+  "base_config": "config.json",
+  "files": {
+    "source_json": "need_parse_unique.json",
+    "videos_dir": "output/runs/windows-4workers/videos",
+    "jsons_dir": "output/runs/windows-4workers/jsons",
+    "logs_dir": "output/runs/windows-4workers",
+    "failed_downloads": "output/runs/windows-4workers/failed_downloads.json",
+    "log_file": "output/runs/windows-4workers/download.log",
+    "summary_file": "output/runs/windows-4workers/summary.json",
+    "results_file": "output/runs/windows-4workers/results_manifest.json"
+  },
+  "telegram": {
+    "source_address": "",
+    "force_ipv4": false,
+    "notify_download_every_n_successes": 0,
+    "notify_skip_every_n_processed": 0,
+    "notify_progress_every_n_processed": 0,
+    "notify_progress_min_interval_seconds": 1800,
+    "notify_coordinator_progress_every_seconds": 1800,
+    "request_timeout_seconds": 30,
+    "retry_attempts": 4,
+    "retry_delay_seconds": 3,
+    "http_pool_connections": 1,
+    "http_pool_maxsize": 1,
+    "notify_on_error": false,
+    "notify_on_heartbeat": false
+  },
+  "settings": {
+    "test_mode": false,
+    "test_limit": 0,
+    "retry_attempts": 3,
+    "retry_delay": 8,
+    "retry_backoff_multiplier": 2.0,
+    "retry_backoff_max_delay_seconds": 60,
+    "retry_jitter_seconds": 2,
+    "javascript_wait_time": 15,
+    "download_timeout": 600,
+    "connect_timeout": 45,
+    "download_chunk_size_kb": 1024,
+    "download_progress_log_seconds": 15,
+    "download_only_original": true,
+    "store_full_api_payload_for_downloaded": true,
+    "download_interface": "",
+    "download_retry_interface": "",
+    "api_401_fallback_to_page": true,
+    "api_connect_timeout_seconds": 10,
+    "api_read_timeout_seconds": 30,
+    "api_http_pool_connections": 1,
+    "api_http_pool_maxsize": 1,
+    "direct_download_timeout_seconds": 10,
+    "curl_stall_timeout_seconds": 60,
+    "login_completion_timeout_seconds": 30,
+    "login_retry_attempts": 3,
+    "login_retry_delay_seconds": 20
+  },
+  "browser": {
+    "uc": true,
+    "headless": false,
+    "xvfb": false,
+    "disable_csp": true,
+    "block_images": false,
+    "incognito": false,
+    "chromium_arg": "--disable-blink-features=AutomationControlled"
+  },
+  "runtime": {
+    "job_name": "windows-4workers",
+    "worker_name": "worker-01",
+    "worker_index": 1,
+    "worker_count": 4,
+    "batch_number": 0,
+    "batch_count": 0,
+    "vimeo_authenticated_session": true
+  },
+  "watchdog": {
+    "enabled": true,
+    "stall_alert_after_seconds": 1800,
+    "repeat_alert_every_seconds": 1800,
+    "heartbeat_every_seconds": 900,
+    "exit_on_stall": true,
+    "stall_exit_after_seconds": 3600
+  },
+  "resume": {
+    "enabled": true,
+    "state_file": "output/runs/windows-4workers/resume_state.json",
+    "skip_completed_files": true,
+    "resume_partial_downloads": true
+  },
+  "offload": {
+    "enabled": false,
+    "storage_root": "",
+    "registry_file": "output/runs/windows-4workers/offload_registry.json",
+    "log_file": "output/runs/windows-4workers/offload.log",
+    "scan_interval_seconds": 600,
+    "min_file_age_seconds": 30,
+    "delete_local_video_after_upload": false,
+    "validate_with_ffprobe": false,
+    "ffprobe_bin": "ffprobe"
+  },
+  "workers": {
+    "count": 4,
+    "stagger_start_seconds": 20,
+    "shared_media_dirs": true,
+    "socket_pressure_gate_enabled": true,
+    "max_tcp_inuse_to_start_worker": 0,
+    "max_tcp_timewait_to_start_worker": 0,
+    "max_tcp_orphan_to_start_worker": 0,
+    "socket_pressure_cooldown_seconds": 60,
+    "wait_for_socket_budget_before_network": false,
+    "socket_pressure_wait_timeout_seconds": 180,
+    "socket_pressure_poll_seconds": 5,
+    "socket_pressure_wait_timeout_action": "restart",
+    "restart_after_processed": 100,
+    "consecutive_timeout_failures_before_restart": 2
+  },
+  "batches": {
+    "stop_on_batch_error": false,
+    "max_batch_retries": 2
+  }
+}

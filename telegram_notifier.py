@@ -59,6 +59,18 @@ class SourceAddressAdapter(HTTPAdapter):
         return super().proxy_manager_for(proxy, **proxy_kwargs)
 
 
+def build_bounded_http_adapter(source_address=None, pool_connections=1, pool_maxsize=1):
+    kwargs = {
+        "pool_connections": max(1, int(pool_connections or 1)),
+        "pool_maxsize": max(1, int(pool_maxsize or 1)),
+        "max_retries": 0,
+        "pool_block": True,
+    }
+    if source_address:
+        return SourceAddressAdapter(source_address=source_address, **kwargs)
+    return HTTPAdapter(**kwargs)
+
+
 class TelegramNotifier:
     """Send progress and alert notifications via Telegram Bot API."""
 
@@ -125,6 +137,20 @@ class TelegramNotifier:
                 3,
             ),
         )
+        self.http_pool_connections = max(
+            1,
+            _int_or_default(
+                telegram_cfg.get("http_pool_connections", 1),
+                1,
+            ),
+        )
+        self.http_pool_maxsize = max(
+            1,
+            _int_or_default(
+                telegram_cfg.get("http_pool_maxsize", 1),
+                1,
+            ),
+        )
         self.force_ipv4 = bool(telegram_cfg.get("force_ipv4", False))
 
         self.notify_on_start = telegram_cfg.get("notify_on_start", True)
@@ -181,10 +207,13 @@ class TelegramNotifier:
             if self.force_ipv4:
                 _force_requests_ipv4()
             self._session = requests.Session()
-            if self.source_address:
-                adapter = SourceAddressAdapter(source_address=self.source_address)
-                self._session.mount("https://", adapter)
-                self._session.mount("http://", adapter)
+            adapter = build_bounded_http_adapter(
+                source_address=self.source_address,
+                pool_connections=self.http_pool_connections,
+                pool_maxsize=self.http_pool_maxsize,
+            )
+            self._session.mount("https://", adapter)
+            self._session.mount("http://", adapter)
             self._message_queue = queue.Queue()
             self._sender_thread = threading.Thread(
                 target=self._sender_loop,
