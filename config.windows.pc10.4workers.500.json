@@ -13,6 +13,9 @@
   "runtime": {
     "job_name": "pc10-windows-4workers-500"
   },
+  "telegram": {
+    "enabled": false
+  },
   "offload": {
     "enabled": true,
     "storage_root": "\\\\sciencestorage\\cc\\vimeo_Datasets",

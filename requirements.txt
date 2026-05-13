@@ -1,6 +1,6 @@
 # Vimeo video downloader dependencies
 
-# Python 3.13 compatibility
+# Python 3.10+ compatibility
 setuptools>=70.0.0
 
 # Web scraping and automation

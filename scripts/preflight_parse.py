@@ -33,10 +33,11 @@ from platform_runtime import (
 
 
 REQUIRED_PYTHON_MODULES = ("requests", "seleniumbase")
+MIN_SUPPORTED_PYTHON = (3, 10)
 TCP_TARGETS = (
-    ("github.com", 443, "GitHub HTTPS"),
-    ("api.vimeo.com", 443, "Vimeo API"),
-    ("api.telegram.org", 443, "Telegram API"),
+    ("github.com", 443, "GitHub HTTPS", "always"),
+    ("api.vimeo.com", 443, "Vimeo API", "always"),
+    ("api.telegram.org", 443, "Telegram API", "telegram"),
 )
 COMMON_PROCESS_PATTERNS = (
     "run_assigned_shards.py",
@@ -156,8 +157,10 @@ def load_profile_config(config_path):
 def path_write_probe(path_value):
     path = Path(path_value)
     target = path if path.exists() else path.parent
+    while not target.exists() and target != target.parent:
+        target = target.parent
     if not target.exists():
-        return False, f"parent missing: {target}"
+        return False, f"parent missing: {path.parent}"
     if not os.access(target, os.W_OK):
         return False, f"not writable: {target}"
     probe = target / f".preflight_write_test_{os.getpid()}_{int(time.time())}"
@@ -165,7 +168,9 @@ def path_write_probe(path_value):
         with open(probe, "w", encoding="utf-8") as handle:
             handle.write("ok\n")
         probe.unlink()
-        return True, str(target)
+        if path.exists():
+            return True, str(target)
+        return True, f"creatable via {target}"
     except Exception as exc:
         return False, f"{target}: {exc}"
 
@@ -333,7 +338,13 @@ def format_gb(value):
 
 def import_python_modules(reporter):
     reporter.section("Python")
-    reporter.pass_("python", sys.version.split()[0])
+    if sys.version_info < MIN_SUPPORTED_PYTHON:
+        reporter.fail(
+            "python",
+            f"{sys.version.split()[0]} (requires {MIN_SUPPORTED_PYTHON[0]}.{MIN_SUPPORTED_PYTHON[1]}+)",
+        )
+    else:
+        reporter.pass_("python", sys.version.split()[0])
     for module_name in REQUIRED_PYTHON_MODULES:
         try:
             importlib.import_module(module_name)
@@ -495,15 +506,22 @@ def check_config_and_paths(config, args, reporter):
 
 def check_interfaces_and_network(config, reporter):
     reporter.section("Network")
+    telegram_enabled = bool(config.get("telegram", {}).get("enabled", False))
 
-    for hostname, _, label in TCP_TARGETS:
+    for hostname, _, label, target_kind in TCP_TARGETS:
+        if target_kind == "telegram" and not telegram_enabled:
+            reporter.pass_(f"DNS {label}", "skipped because telegram.enabled=false")
+            continue
         ok, detail = check_dns(hostname)
         if ok:
             reporter.pass_(f"DNS {label}", detail)
         else:
             reporter.fail(f"DNS {label}", detail)
 
-    for hostname, port, label in TCP_TARGETS:
+    for hostname, port, label, target_kind in TCP_TARGETS:
+        if target_kind == "telegram" and not telegram_enabled:
+            reporter.pass_(f"TCP {label}", "skipped because telegram.enabled=false")
+            continue
         ok, detail = tcp_connect(hostname, port, timeout=5)
         if ok:
             reporter.pass_(f"TCP {label}", detail)
@@ -560,12 +578,20 @@ def check_system_state(config, args, reporter):
     reporter.section("System")
 
     videos_dir = Path(config["files"]["videos_dir"])
-    local_disk = shutil.disk_usage(videos_dir if videos_dir.exists() else videos_dir.parent)
-    local_free_gb = local_disk.free / 1024 / 1024 / 1024
-    if local_free_gb < args.min_local_free_gb:
-        reporter.warn("local disk free", format_gb(local_free_gb))
+    local_disk_target = videos_dir if videos_dir.exists() else videos_dir.parent
+    while not local_disk_target.exists() and local_disk_target != local_disk_target.parent:
+        local_disk_target = local_disk_target.parent
+    if not local_disk_target.exists():
+        reporter.fail("local disk free", f"disk anchor missing for {videos_dir}")
+        local_disk = None
     else:
-        reporter.pass_("local disk free", format_gb(local_free_gb))
+        local_disk = shutil.disk_usage(local_disk_target)
+    if local_disk is not None:
+        local_free_gb = local_disk.free / 1024 / 1024 / 1024
+        if local_free_gb < args.min_local_free_gb:
+            reporter.warn("local disk free", format_gb(local_free_gb))
+        else:
+            reporter.pass_("local disk free", format_gb(local_free_gb))
 
     offload_cfg = config.get("offload", {})
     storage_root = offload_cfg.get("storage_root", "")

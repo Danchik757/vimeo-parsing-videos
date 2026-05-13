@@ -178,7 +178,7 @@ def worker_popen_kwargs():
     return {"start_new_session": True}
 
 
-def _taskkill_process_tree(pid, force, logger=None, label="process"):
+def _taskkill_process_tree(pid, force, logger=None, label="process", timeout_seconds=5):
     command = ["taskkill", "/PID", str(pid), "/T"]
     if force:
         command.append("/F")
@@ -188,8 +188,18 @@ def _taskkill_process_tree(pid, force, logger=None, label="process"):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=max(1, float(timeout_seconds or 1)),
         )
         return completed.returncode == 0
+    except subprocess.TimeoutExpired:
+        if logger is not None:
+            logger.warning(
+                "taskkill timed out for %s (%s) after %.1fs",
+                label,
+                pid,
+                max(1.0, float(timeout_seconds or 1)),
+            )
+        return False
     except Exception as exc:
         if logger is not None:
             logger.debug("taskkill failed for %s (%s): %s", label, pid, exc)
@@ -263,6 +273,7 @@ def terminate_child_process_trees_for_restart(logger=None, label="current-proces
             force=True,
             logger=logger,
             label=f"{label}-child-{child_pid}",
+            timeout_seconds=3,
         )
 
 
@@ -275,7 +286,13 @@ def terminate_process_tree(process, logger, label, timeout_seconds=10):
             except Exception:
                 return
         else:
-            _taskkill_process_tree(pid, force=False, logger=logger, label=label)
+            _taskkill_process_tree(
+                pid,
+                force=False,
+                logger=logger,
+                label=label,
+                timeout_seconds=min(max(1, int(timeout_seconds or 1)), 3),
+            )
 
         deadline = time.time() + max(1, int(timeout_seconds))
         while time.time() < deadline:
@@ -284,7 +301,13 @@ def terminate_process_tree(process, logger, label, timeout_seconds=10):
             time.sleep(0.5)
 
         logger.warning("Force-killing %s after terminate timeout", label)
-        if pid is not None and _taskkill_process_tree(pid, force=True, logger=logger, label=label):
+        if pid is not None and _taskkill_process_tree(
+            pid,
+            force=True,
+            logger=logger,
+            label=label,
+            timeout_seconds=min(max(1, int(timeout_seconds or 1)), 3),
+        ):
             return
         try:
             process.kill()
@@ -334,7 +357,21 @@ def cleanup_process_tree_after_exit(process, logger, label, timeout_seconds=5):
         return
 
     if is_windows():
-        _taskkill_process_tree(int(process.pid), force=True, logger=logger, label=label)
+        started_at = time.monotonic()
+        _taskkill_process_tree(
+            int(process.pid),
+            force=True,
+            logger=logger,
+            label=label,
+            timeout_seconds=max(1, int(timeout_seconds or 1)),
+        )
+        elapsed = time.monotonic() - started_at
+        if elapsed > 2:
+            logger.warning(
+                "Windows post-exit cleanup for %s took %.1fs",
+                label,
+                elapsed,
+            )
         return
 
     try:

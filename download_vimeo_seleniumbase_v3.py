@@ -23,6 +23,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 
 from config_utils import load_json_config_with_optional_secrets, resolve_path
 from platform_runtime import (
+    find_browser_command,
     is_windows,
     load_socket_usage,
     terminate_child_process_trees_for_restart,
@@ -2312,13 +2313,36 @@ def build_sb_kwargs(config, logger):
         logger.warning("xvfb requested on unsupported platform; disabling xvfb")
         xvfb = False
 
+    browser_name = str(browser.get("browser_name", "") or "").strip().lower()
+    binary_location = str(browser.get("binary_location", "") or "").strip()
+    if not binary_location:
+        detected_browser = find_browser_command()
+        if detected_browser:
+            binary_location = str(detected_browser)
+    if not browser_name and binary_location:
+        lowered_binary = binary_location.lower()
+        if "msedge" in lowered_binary or lowered_binary.endswith("edge"):
+            browser_name = "edge"
+        else:
+            browser_name = "chrome"
+    if not browser_name:
+        browser_name = "chrome"
+
+    logger.info(
+        "Selected SeleniumBase browser: browser=%s binary=%s",
+        browser_name,
+        binary_location or "<default>",
+    )
+
     return {
+        "browser": browser_name,
         "uc": bool(browser.get("uc", True)),
         "headless": bool(browser.get("headless", False)),
         "xvfb": xvfb,
         "disable_csp": bool(browser.get("disable_csp", True)),
         "block_images": bool(browser.get("block_images", False)),
         "incognito": bool(browser.get("incognito", False)),
+        "binary_location": binary_location or None,
         "chromium_arg": browser.get(
             "chromium_arg",
             "--disable-blink-features=AutomationControlled",

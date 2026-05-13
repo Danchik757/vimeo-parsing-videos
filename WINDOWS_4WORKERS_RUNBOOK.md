@@ -35,7 +35,8 @@
 
 ## Подготовка Windows-машины
 
-1. Установить Python 3.13.
+1. Установить Python 3.10+.
+   Рекомендуемый вариант: Python 3.11.
 2. Установить Google Chrome или Microsoft Edge.
 3. Скопировать репозиторий целиком.
 4. Открыть `cmd` или PowerShell в корне репозитория.
@@ -43,27 +44,27 @@
 
 ```powershell
 $env:PYTHONIOENCODING = "utf-8"
-py -3.13 -m venv venv
-venv\Scripts\python -m pip install --upgrade pip
-venv\Scripts\python -m pip install -r requirements.txt
+py -3.11 -m venv venv
+.\venv\Scripts\python.exe -m pip install --upgrade pip
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ## Быстрый smoke-check
 
 ```powershell
-venv\Scripts\python scripts\preflight_parse.py --config config.windows.4workers.json
+.\venv\Scripts\python.exe scripts\preflight_parse.py --config config.windows.4workers.json
 ```
 
 ## Полный запуск на master list
 
 ```powershell
-venv\Scripts\python run_assigned_shards.py --config config.windows.4workers.json --manifest data_shards\server_assignments_10000\parse-3\manifest.json --workers 4
+.\venv\Scripts\python.exe run_assigned_shards.py --config config.windows.4workers.json --manifest data_shards\server_assignments_10000\parse-3\manifest.json --workers 4
 ```
 
 ## Если нужен локальный single-worker smoke
 
 ```powershell
-venv\Scripts\python download_vimeo_seleniumbase_v3.py --config config.windows.4workers.json
+.\venv\Scripts\python.exe download_vimeo_seleniumbase_v3.py --config config.windows.4workers.json
 ```
 
 ## Что проверить перед production run

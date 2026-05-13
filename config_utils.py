@@ -44,7 +44,7 @@ def load_json_with_base_config(config_path, visited=None):
         raise ValueError(f"base_config cycle detected: {config_path}")
     visited.add(config_key)
 
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, "r", encoding="utf-8-sig") as f:
         config = json.load(f)
 
     base_config_value = str(config.get("base_config", "")).strip()
@@ -92,7 +92,7 @@ def load_json_config_with_optional_secrets(config_path):
     secrets_path = None
     if secrets_file:
         secrets_path = resolve_path(config_dir, secrets_file)
-        with open(secrets_path, "r", encoding="utf-8") as f:
+        with open(secrets_path, "r", encoding="utf-8-sig") as f:
             secrets = json.load(f)
         config = deep_merge_dict(config, secrets)
 
