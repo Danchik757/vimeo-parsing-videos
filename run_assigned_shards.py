@@ -38,6 +38,25 @@ def read_json(path):
         return json.load(f)
 
 
+def load_batch_summary_excerpt(summary_path):
+    path = Path(summary_path)
+    if not path.exists():
+        return {}
+
+    try:
+        summary = read_json(path)
+    except Exception:
+        return {}
+
+    return {
+        "summary_exit_code": summary.get("exit_code"),
+        "fatal_error": summary.get("fatal_error"),
+        "restart_requested": summary.get("restart_requested"),
+        "restart_reason": summary.get("restart_reason"),
+        "resume_next_index": summary.get("resume_next_index"),
+    }
+
+
 def write_json(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,7 +269,9 @@ def build_assignment_state(manifest, selected_batches):
             "exit_code": None,
             "batch_dir": None,
             "retry_count": 0,
+            "controlled_restart_count": 0,
             "last_error": None,
+            "last_restart": None,
         }
     return {
         "manifest_path": manifest["manifest_path"],
@@ -284,7 +305,11 @@ def load_assignment_state(state_path, manifest, selected_batches, logger):
         item = dict(default_state["items"][key])
         item.update(loaded_items.get(key, {}))
         item["retry_count"] = max(0, int(item.get("retry_count", 0) or 0))
+        item["controlled_restart_count"] = max(
+            0, int(item.get("controlled_restart_count", 0) or 0)
+        )
         item.setdefault("last_error", None)
+        item.setdefault("last_restart", None)
         if item.get("status") == "running":
             item["status"] = "pending"
             item["assigned_worker"] = None
@@ -615,6 +640,48 @@ def handle_batch_failure(state_item, batch_number, return_code, summary_exists, 
         "retry_count": retry_count,
         "max_batch_retries": max_batch_retries,
         "stop_requested": bool((batches_config or {}).get("stop_on_batch_error", True)),
+    }
+
+
+def handle_controlled_restart(state_item, batch_number, return_code, summary_exists, results_exists, batches_config):
+    restart_count = max(0, int(state_item.get("controlled_restart_count", 0) or 0))
+    max_controlled_restarts = max(
+        0, int((batches_config or {}).get("max_controlled_restarts", 0) or 0)
+    )
+    next_restart = restart_count + 1
+
+    restart_info = {
+        "at": now_string(),
+        "batch_number": int(batch_number),
+        "exit_code": return_code,
+        "summary_exists": bool(summary_exists),
+        "results_exists": bool(results_exists),
+    }
+    state_item["last_restart"] = restart_info
+    state_item["controlled_restart_count"] = next_restart
+
+    if max_controlled_restarts > 0 and next_restart > max_controlled_restarts:
+        state_item["status"] = "failed"
+        state_item["last_error"] = {
+            **restart_info,
+            "reason": "controlled_restart_limit_exceeded",
+        }
+        return {
+            "requeued": False,
+            "restart_count": next_restart,
+            "max_controlled_restarts": max_controlled_restarts,
+            "stop_requested": bool((batches_config or {}).get("stop_on_batch_error", True)),
+        }
+
+    state_item["status"] = "pending"
+    state_item["assigned_worker"] = None
+    state_item["exit_code"] = None
+    state_item["last_error"] = None
+    return {
+        "requeued": True,
+        "restart_count": next_restart,
+        "max_controlled_restarts": max_controlled_restarts,
+        "stop_requested": False,
     }
 
 
@@ -949,43 +1016,77 @@ def main():
             state_item["finished_at"] = now_string()
             state_item["exit_code"] = return_code
             slot_summaries[slot_name]["active_batch_number"] = None
+            batch_summary_excerpt = load_batch_summary_excerpt(batch_summary_path)
 
             if return_code == CONTROLLED_RESTART_EXIT_CODE:
-                state_item["status"] = "pending"
-                state_item["assigned_worker"] = None
-                state_item["exit_code"] = None
-                state_item["last_error"] = None
-                state_item["last_restart"] = {
-                    "at": now_string(),
-                    "batch_number": batch_number,
-                    "exit_code": return_code,
-                    "summary_exists": bool(batch_summary_path.exists()),
-                    "results_exists": bool(batch_results_path.exists()),
-                }
-                slot_summaries[slot_name]["restarts_requested"] = int(
-                    slot_summaries[slot_name].get("restarts_requested", 0)
-                ) + 1
-                save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
-                logger.warning(
-                    "Batch %04d requested controlled restart (exit_code=%s, summary=%s, results=%s); re-queueing without failure",
+                restart_action = handle_controlled_restart(
+                    state_item,
                     batch_number,
                     return_code,
                     batch_summary_path.exists(),
                     batch_results_path.exists(),
+                    master_config.get("batches", {}),
                 )
-                if telegram.notify_on_error:
-                    telegram.notify_custom(
-                        "Assignment batch recycle",
-                        [
-                            f"worker: <code>{slot_name}</code>",
-                            f"batch: <code>{batch_number:04d}</code>",
-                            f"shard: <code>{Path(item['source_json']).name}</code>",
-                            f"exit_code: <code>{return_code}</code>",
-                            f"summary_exists: <code>{batch_summary_path.exists()}</code>",
-                            f"results_exists: <code>{batch_results_path.exists()}</code>",
-                            "action: <code>requeued with existing resume state</code>",
-                        ],
+                slot_summaries[slot_name]["restarts_requested"] = int(
+                    slot_summaries[slot_name].get("restarts_requested", 0)
+                ) + 1
+                save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
+                if restart_action["requeued"]:
+                    logger.warning(
+                        "Batch %04d requested controlled restart (exit_code=%s, summary=%s, results=%s); re-queueing without failure (%d/%s)",
+                        batch_number,
+                        return_code,
+                        batch_summary_path.exists(),
+                        batch_results_path.exists(),
+                        int(restart_action["restart_count"]),
+                        int(restart_action["max_controlled_restarts"])
+                        if int(restart_action["max_controlled_restarts"]) > 0
+                        else "inf",
                     )
+                    if telegram.notify_on_error:
+                        telegram.notify_custom(
+                            "Assignment batch recycle",
+                            [
+                                f"worker: <code>{slot_name}</code>",
+                                f"batch: <code>{batch_number:04d}</code>",
+                                f"shard: <code>{Path(item['source_json']).name}</code>",
+                                f"exit_code: <code>{return_code}</code>",
+                                f"summary_exists: <code>{batch_summary_path.exists()}</code>",
+                                f"results_exists: <code>{batch_results_path.exists()}</code>",
+                                f"summary_exit_code: <code>{batch_summary_excerpt.get('summary_exit_code')}</code>",
+                                f"resume_next_index: <code>{batch_summary_excerpt.get('resume_next_index')}</code>",
+                                f"restart_reason: <code>{batch_summary_excerpt.get('restart_reason') or '-'}</code>",
+                                f"restart_count: <code>{int(restart_action['restart_count'])}/{int(restart_action['max_controlled_restarts']) if int(restart_action['max_controlled_restarts']) > 0 else 'inf'}</code>",
+                                "action: <code>requeued with existing resume state</code>",
+                            ],
+                        )
+                else:
+                    logger.error(
+                        "Batch %04d exceeded controlled restart limit (exit_code=%s, summary=%s, results=%s)",
+                        batch_number,
+                        return_code,
+                        batch_summary_path.exists(),
+                        batch_results_path.exists(),
+                    )
+                    exit_code = 1
+                    if telegram.notify_on_error:
+                        telegram.notify_custom(
+                            "Assignment batch restart limit",
+                            [
+                                f"worker: <code>{slot_name}</code>",
+                                f"batch: <code>{batch_number:04d}</code>",
+                                f"shard: <code>{Path(item['source_json']).name}</code>",
+                                f"exit_code: <code>{return_code}</code>",
+                                f"summary_exists: <code>{batch_summary_path.exists()}</code>",
+                                f"results_exists: <code>{batch_results_path.exists()}</code>",
+                                f"summary_exit_code: <code>{batch_summary_excerpt.get('summary_exit_code')}</code>",
+                                f"resume_next_index: <code>{batch_summary_excerpt.get('resume_next_index')}</code>",
+                                f"restart_reason: <code>{batch_summary_excerpt.get('restart_reason') or '-'}</code>",
+                                f"restart_count: <code>{int(restart_action['restart_count'])}/{int(restart_action['max_controlled_restarts'])}</code>",
+                            ],
+                        )
+                    if restart_action["stop_requested"]:
+                        stop_requested = True
             elif return_code == 0 and batch_summary_path.exists() and batch_results_path.exists():
                 batch_summary = read_json(batch_summary_path)
                 batch_results = read_json(batch_results_path)
@@ -1000,7 +1101,7 @@ def main():
                 slot_summaries[slot_name]["skipped"] += int(batch_summary.get("skipped", 0))
                 slot_summaries[slot_name]["failed"] += int(batch_summary.get("failed", 0))
                 slot_summaries[slot_name]["total_processed"] += int(
-                    batch_summary.get("total_processed", 0)
+                    batch_summary.get("total_processed", batch_summary.get("total", 0))
                 )
                 save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
 
@@ -1033,6 +1134,12 @@ def main():
                         int(failure_action["retry_count"]),
                         int(failure_action["max_batch_retries"]),
                     )
+                    if batch_summary_excerpt.get("fatal_error"):
+                        logger.warning(
+                            "Batch %04d fatal detail: %s",
+                            batch_number,
+                            str(batch_summary_excerpt.get("fatal_error"))[:500],
+                        )
                     if telegram.notify_on_error:
                         telegram.notify_custom(
                             "Assignment batch retry",
@@ -1044,6 +1151,9 @@ def main():
                                 f"retry: <code>{int(failure_action['retry_count'])}/{int(failure_action['max_batch_retries'])}</code>",
                                 f"summary_exists: <code>{batch_summary_path.exists()}</code>",
                                 f"results_exists: <code>{batch_results_path.exists()}</code>",
+                                f"summary_exit_code: <code>{batch_summary_excerpt.get('summary_exit_code')}</code>",
+                                f"resume_next_index: <code>{batch_summary_excerpt.get('resume_next_index')}</code>",
+                                f"fatal_error: <code>{str(batch_summary_excerpt.get('fatal_error') or '-')[:350]}</code>",
                             ],
                         )
                 else:
@@ -1054,6 +1164,12 @@ def main():
                         batch_summary_path.exists(),
                         batch_results_path.exists(),
                     )
+                    if batch_summary_excerpt.get("fatal_error"):
+                        logger.error(
+                            "Batch %04d fatal detail: %s",
+                            batch_number,
+                            str(batch_summary_excerpt.get("fatal_error"))[:500],
+                        )
                     exit_code = 1
                     if telegram.notify_on_error:
                         telegram.notify_custom(
@@ -1066,6 +1182,9 @@ def main():
                                 f"retries_exhausted: <code>{int(failure_action['retry_count'])}/{int(failure_action['max_batch_retries'])}</code>",
                                 f"summary_exists: <code>{batch_summary_path.exists()}</code>",
                                 f"results_exists: <code>{batch_results_path.exists()}</code>",
+                                f"summary_exit_code: <code>{batch_summary_excerpt.get('summary_exit_code')}</code>",
+                                f"resume_next_index: <code>{batch_summary_excerpt.get('resume_next_index')}</code>",
+                                f"fatal_error: <code>{str(batch_summary_excerpt.get('fatal_error') or '-')[:350]}</code>",
                             ],
                         )
                     if failure_action["stop_requested"]:

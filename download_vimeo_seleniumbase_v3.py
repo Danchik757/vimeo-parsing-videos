@@ -206,6 +206,7 @@ def load_config(config_path):
     batches.setdefault("reuse_existing_shards", True)
     batches.setdefault("stop_on_batch_error", True)
     batches.setdefault("max_batch_retries", 0)
+    batches.setdefault("max_controlled_restarts", 0)
     batches.setdefault("max_batches", 0)
     batches.setdefault("shards_dir", "data_shards/generated_batches")
     batches.setdefault("runs_dir", "output/batches/runs")
@@ -333,6 +334,7 @@ class ActivityWatchdog(threading.Thread):
         self.runtime_state = runtime_state
         self.telegram = telegram
         self.logger = logger
+        self.config = config
         self.enabled = bool(watchdog_cfg.get("enabled", True))
         self.stall_after = int(watchdog_cfg.get("stall_alert_after_seconds", 1800))
         self.repeat_every = int(watchdog_cfg.get("repeat_alert_every_seconds", 1800))
@@ -413,6 +415,10 @@ class ActivityWatchdog(threading.Thread):
                     ],
                 )
                 self.telegram.shutdown(timeout=5)
+                try:
+                    write_watchdog_restart_summary(self.config, snapshot, idle_for)
+                except Exception as exc:
+                    self.logger.warning("Failed to write watchdog restart summary: %s", exc)
                 terminate_child_process_trees_for_restart(
                     logger=self.logger,
                     label=f"worker-stall-{snapshot['worker_name'] or 'unknown'}",
@@ -426,6 +432,44 @@ class StageTimeoutError(TimeoutError):
 
 class ControlledWorkerRestart(RuntimeError):
     """Raised when a worker should exit cleanly and resume in a fresh process."""
+
+
+def write_watchdog_restart_summary(config, snapshot, idle_for):
+    processed = int(snapshot.get("processed", 0) or 0)
+    summary = {
+        "worker_name": snapshot.get("worker_name"),
+        "config_path": config["_meta"]["config_path"],
+        "browser_mode": browser_mode_label(config),
+        "total": processed,
+        "total_processed": processed,
+        "downloaded": int(snapshot.get("downloaded", 0) or 0),
+        "skipped": int(snapshot.get("skipped", 0) or 0),
+        "failed": int(snapshot.get("failed", 0) or 0),
+        "failed_urls": 0,
+        "exit_code": CONTROLLED_RESTART_EXIT_CODE,
+        "fatal_error": None,
+        "restart_requested": True,
+        "restart_reason": (
+            f"watchdog stall restart after {int(idle_for)}s idle "
+            f"at stage '{snapshot.get('current_stage') or 'unknown'}'"
+        ),
+        "log_file": config["files"]["log_file"],
+        "videos_dir": config["files"]["videos_dir"],
+        "jsons_dir": config["files"]["jsons_dir"],
+        "failed_downloads": config["files"]["failed_downloads"],
+        "results_file": config["files"]["results_file"],
+        "storage_layout": {
+            "downloaded": "per_video_directory",
+            "not_downloaded": "flat_json",
+            "no_links": "flat_json",
+        },
+        "resume_enabled": config["resume"]["enabled"],
+        "resume_state_file": config["resume"]["state_file"],
+        "resume_next_index": processed,
+        "resume_completed": False,
+        "resume_source_signature": None,
+    }
+    write_summary(config, summary)
 
 
 def call_with_stage_timeout(timeout_seconds, description, func, *args, **kwargs):
@@ -2691,6 +2735,15 @@ def load_existing_failed_urls(config, logger, should_resume):
     return []
 
 
+def should_recycle_after_fatal_exception(config, start_index, successful_downloads, skipped_videos, failed_videos):
+    if not bool(config["resume"].get("enabled", False)):
+        return False
+
+    processed_total = successful_downloads + skipped_videos + failed_videos
+    new_progress = processed_total - int(start_index or 0)
+    return new_progress > 0
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Vimeo downloader worker")
     parser.add_argument(
@@ -3654,15 +3707,41 @@ def main():
         logger.warning("Worker requested controlled restart: %s", exc)
     except Exception as exc:
         fatal_error = str(exc)
-        exit_code = 1
-        logger.exception("Fatal runtime error: %s", exc)
-        telegram.notify_custom(
-            "Процесс аварийно завершился",
-            [
-                f"error: <code>{str(exc)[:350]}</code>",
-                f"config: <code>{config['_meta']['config_path']}</code>",
-            ],
-        )
+        if should_recycle_after_fatal_exception(
+            config,
+            start_index,
+            successful_downloads,
+            skipped_videos,
+            failed_videos,
+        ):
+            controlled_restart_requested = True
+            controlled_restart_reason = (
+                f"fatal runtime after partial progress: {str(exc)[:300]}"
+            )
+            fatal_error = None
+            exit_code = CONTROLLED_RESTART_EXIT_CODE
+            logger.exception(
+                "Fatal runtime error after partial progress; requesting controlled restart: %s",
+                exc,
+            )
+            telegram.notify_custom(
+                "Worker requested recycle after fatal runtime",
+                [
+                    f"error: <code>{str(exc)[:350]}</code>",
+                    f"config: <code>{config['_meta']['config_path']}</code>",
+                    f"resume_next_index: <code>{resume_state.get('next_index')}</code>",
+                ],
+            )
+        else:
+            exit_code = 1
+            logger.exception("Fatal runtime error: %s", exc)
+            telegram.notify_custom(
+                "Процесс аварийно завершился",
+                [
+                    f"error: <code>{str(exc)[:350]}</code>",
+                    f"config: <code>{config['_meta']['config_path']}</code>",
+                ],
+            )
     finally:
         watchdog.stop()
         watchdog.join(timeout=10)
@@ -3708,6 +3787,7 @@ def main():
         "config_path": config["_meta"]["config_path"],
         "browser_mode": browser_mode,
         "total": total_processed,
+        "total_processed": total_processed,
         "downloaded": successful_downloads,
         "skipped": skipped_videos,
         "failed": failed_videos,

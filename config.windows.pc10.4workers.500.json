@@ -26,5 +26,8 @@
     "delete_local_video_after_upload": false,
     "validate_with_ffprobe": false,
     "ffprobe_bin": "ffprobe"
+  },
+  "batches": {
+    "max_controlled_restarts": 12
   }
 }
