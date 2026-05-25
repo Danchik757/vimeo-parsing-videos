@@ -57,6 +57,38 @@ def load_batch_summary_excerpt(summary_path):
     }
 
 
+def merge_batch_outputs_if_present(
+    batch_summary_path,
+    batch_results_path,
+    global_results,
+    batch_number,
+    slot_name,
+    results_path,
+    workers_root,
+    logger,
+):
+    if not (Path(batch_summary_path).exists() and Path(batch_results_path).exists()):
+        return None, None
+
+    try:
+        batch_summary = read_json(batch_summary_path)
+        batch_results = read_json(batch_results_path)
+    except Exception as exc:
+        logger.warning(
+            "Failed to read batch %04d outputs for merge (%s, %s): %s",
+            int(batch_number),
+            batch_summary_path,
+            batch_results_path,
+            exc,
+        )
+        return None, None
+
+    merge_shard_results(global_results, batch_results, batch_number, slot_name)
+    save_assignment_results(results_path, global_results)
+    exported_lists = write_result_url_lists(global_results.get("items", []), workers_root)
+    return batch_summary, exported_lists
+
+
 def write_json(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1068,6 +1100,21 @@ def main():
                         batch_summary_path.exists(),
                         batch_results_path.exists(),
                     )
+                    batch_summary, exported_lists = merge_batch_outputs_if_present(
+                        batch_summary_path,
+                        batch_results_path,
+                        global_results,
+                        batch_number,
+                        slot_name,
+                        results_path,
+                        workers_root,
+                        logger,
+                    )
+                    if batch_summary is not None:
+                        logger.warning(
+                            "Merged partial outputs for terminally failed batch %04d after controlled restart limit",
+                            batch_number,
+                        )
                     exit_code = 1
                     if telegram.notify_on_error:
                         telegram.notify_custom(
@@ -1088,31 +1135,53 @@ def main():
                     if restart_action["stop_requested"]:
                         stop_requested = True
             elif return_code == 0 and batch_summary_path.exists() and batch_results_path.exists():
-                batch_summary = read_json(batch_summary_path)
-                batch_results = read_json(batch_results_path)
-                merge_shard_results(global_results, batch_results, batch_number, slot_name)
-                save_assignment_results(results_path, global_results)
-                exported_lists = write_result_url_lists(global_results.get("items", []), workers_root)
-
-                slot_summaries[slot_name]["completed_batches"] = sorted(
-                    set(slot_summaries[slot_name].get("completed_batches", [])) | {batch_number}
-                )
-                slot_summaries[slot_name]["downloaded"] += int(batch_summary.get("downloaded", 0))
-                slot_summaries[slot_name]["skipped"] += int(batch_summary.get("skipped", 0))
-                slot_summaries[slot_name]["failed"] += int(batch_summary.get("failed", 0))
-                slot_summaries[slot_name]["total_processed"] += int(
-                    batch_summary.get("total_processed", batch_summary.get("total", 0))
-                )
-                save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
-
-                state_item["status"] = "completed"
-                logger.info(
-                    "Merged batch %04d results: downloaded=%d skipped=%d failed=%d",
+                batch_summary, exported_lists = merge_batch_outputs_if_present(
+                    batch_summary_path,
+                    batch_results_path,
+                    global_results,
                     batch_number,
-                    int(batch_summary.get("downloaded", 0)),
-                    int(batch_summary.get("skipped", 0)),
-                    int(batch_summary.get("failed", 0)),
+                    slot_name,
+                    results_path,
+                    workers_root,
+                    logger,
                 )
+                if batch_summary is None:
+                    logger.error(
+                        "Batch %04d reported success but its outputs could not be merged",
+                        batch_number,
+                    )
+                    state_item["status"] = "failed"
+                    state_item["last_error"] = {
+                        "at": now_string(),
+                        "batch_number": batch_number,
+                        "exit_code": return_code,
+                        "summary_exists": bool(batch_summary_path.exists()),
+                        "results_exists": bool(batch_results_path.exists()),
+                        "reason": "merge_outputs_failed",
+                    }
+                    slot_summaries[slot_name]["failed"] += 1
+                    save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
+                    exit_code = 1
+                else:
+                    slot_summaries[slot_name]["completed_batches"] = sorted(
+                        set(slot_summaries[slot_name].get("completed_batches", [])) | {batch_number}
+                    )
+                    slot_summaries[slot_name]["downloaded"] += int(batch_summary.get("downloaded", 0))
+                    slot_summaries[slot_name]["skipped"] += int(batch_summary.get("skipped", 0))
+                    slot_summaries[slot_name]["failed"] += int(batch_summary.get("failed", 0))
+                    slot_summaries[slot_name]["total_processed"] += int(
+                        batch_summary.get("total_processed", batch_summary.get("total", 0))
+                    )
+                    save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
+
+                    state_item["status"] = "completed"
+                    logger.info(
+                        "Merged batch %04d results: downloaded=%d skipped=%d failed=%d",
+                        batch_number,
+                        int(batch_summary.get("downloaded", 0)),
+                        int(batch_summary.get("skipped", 0)),
+                        int(batch_summary.get("failed", 0)),
+                    )
             else:
                 failure_action = handle_batch_failure(
                     state_item,
@@ -1164,6 +1233,21 @@ def main():
                         batch_summary_path.exists(),
                         batch_results_path.exists(),
                     )
+                    batch_summary, exported_lists = merge_batch_outputs_if_present(
+                        batch_summary_path,
+                        batch_results_path,
+                        global_results,
+                        batch_number,
+                        slot_name,
+                        results_path,
+                        workers_root,
+                        logger,
+                    )
+                    if batch_summary is not None:
+                        logger.warning(
+                            "Merged partial outputs for terminally failed batch %04d",
+                            batch_number,
+                        )
                     if batch_summary_excerpt.get("fatal_error"):
                         logger.error(
                             "Batch %04d fatal detail: %s",

@@ -23,7 +23,7 @@
 
 Основной профиль в репозитории:
 
-- `config.parse-3.profile.json`
+- `configs/parse3/config.parse-3.profile.json`
 
 Локальный secrets-файл должен лежать рядом и называться:
 
@@ -31,7 +31,7 @@
 
 Его можно создать по шаблону:
 
-- `config.parse-3.secrets.example.json`
+- `configs/parse3/config.parse-3.secrets.example.json`
 
 ## Сеть
 
@@ -73,7 +73,7 @@ tmux new -s parse3-parser
 cd /29d_kon/projects/vimeo-parsing-videos
 source venv/bin/activate
 python run_assigned_shards.py \
-  --config config.parse-3.profile.json \
+  --config configs/parse3/config.parse-3.profile.json \
   --manifest data_shards/server_assignments_10000/parse-3/manifest.json \
   --workers 10
 ```
@@ -84,7 +84,7 @@ Offloader:
 tmux new -s parse3-offload
 cd /29d_kon/projects/vimeo-parsing-videos
 source venv/bin/activate
-python scripts/offload_downloads.py --config config.parse-3.profile.json --watch --delete-local-video
+python scripts/offload_downloads.py --config configs/parse3/config.parse-3.profile.json --watch --delete-local-video
 ```
 
 ## Что появится в `workers/`

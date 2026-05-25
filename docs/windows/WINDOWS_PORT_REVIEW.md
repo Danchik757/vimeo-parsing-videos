@@ -140,12 +140,12 @@ if stagger > 0 and slot_index < worker_count:
 ### HIGH-2 — `api_401_fallback_to_page: true` в конфиге — мёртвый ключ, 401 всегда останавливает batch
 
 **Severity:** HIGH  
-**Файлы:** `download_vimeo_seleniumbase_v3.py:2927-2952`, `config.windows.4workers.json:46`
+**Файлы:** `download_vimeo_seleniumbase_v3.py:2927-2952`, `configs/windows/config.windows.4workers.json:46`
 
 **Почему это баг:**
 
 ```json
-// config.windows.4workers.json
+// configs/windows/config.windows.4workers.json
 "api_401_fallback_to_page": true
 ```
 
@@ -167,7 +167,7 @@ if response.status_code == 401:
 **Вариант A — убрать мёртвый ключ из конфига:**
 
 ```json
-// config.windows.4workers.json — убрать строку:
+// configs/windows/config.windows.4workers.json — убрать строку:
 // "api_401_fallback_to_page": true,
 ```
 
@@ -251,7 +251,7 @@ Watchdog поймает stall только через `stall_exit_after_seconds=
 **Рекомендация:** Уменьшить `watchdog.stall_exit_after_seconds` до 600-900 для Windows.
 
 ```json
-// config.windows.4workers.json
+// configs/windows/config.windows.4workers.json
 "watchdog": {
     "enabled": true,
     "stall_alert_after_seconds": 600,
@@ -367,7 +367,7 @@ Socket pressure gate корректно отключён: все лимиты = 
 
 ### Config inheritance через base_config
 
-`config.windows.4workers.json` → `base_config: config.json` через `load_json_with_base_config` с cycle detection. Deep merge корректен. Windows overrides точечны. Credentials из `config.json` доступны всем workers. **Не трогать.**
+`configs/windows/config.windows.4workers.json` → `base_config: ../../config.json` через `load_json_with_base_config` с cycle detection. Deep merge корректен. Windows overrides точечны. Credentials из `config.json` доступны всем workers. **Не трогать.**
 
 ### API pool credential distribution
 
@@ -448,5 +448,5 @@ os.replace(temp_path, state_path)  # atomic on Windows (NTFS)
 1. **CRITICAL-1** — убрать `terminate_current_process_tree_for_restart` из watchdog, оставить только `os._exit(75)` — но принять это как patch только в связке с решением по **HIGH-2 (child cleanup)**
 2. **HIGH-2 (child cleanup)** — выбрать стратегию: runbook + ручная очистка, или явный Chrome kill до `os._exit`, или fallback в `cleanup_process_tree_after_exit`
 3. **HIGH-1** — добавить stagger между worker starters в координатор
-4. **HIGH-2 (api_401)** — убрать `api_401_fallback_to_page` из `config.windows.4workers.json` или реализовать логику в коде
-5. **MEDIUM-2** — уменьшить `watchdog.stall_exit_after_seconds` до 900 в `config.windows.4workers.json`
+4. **HIGH-2 (api_401)** — убрать `api_401_fallback_to_page` из `configs/windows/config.windows.4workers.json` или реализовать логику в коде
+5. **MEDIUM-2** — уменьшить `watchdog.stall_exit_after_seconds` до 900 в `configs/windows/config.windows.4workers.json`

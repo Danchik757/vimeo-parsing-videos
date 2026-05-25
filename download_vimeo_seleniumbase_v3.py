@@ -2397,8 +2397,10 @@ def build_sb_kwargs(config, logger):
 def write_summary(config, summary):
     summary_path = Path(config["files"]["summary_file"])
     summary_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(summary_path, "w", encoding="utf-8") as f:
+    temp_path = summary_path.with_suffix(summary_path.suffix + ".tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
+    os.replace(temp_path, summary_path)
 
 
 def _now_string():

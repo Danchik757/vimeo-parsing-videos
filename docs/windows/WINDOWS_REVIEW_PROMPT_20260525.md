@@ -40,11 +40,15 @@
 
 - `windows`
 
-Актуальный HEAD на момент постановки задачи:
+Это review именно **рабочего дерева**, а не только последнего коммита.
 
-- `2854b40`
+Перед чтением кода сначала проверь локальное состояние репозитория командами:
 
-На момент постановки этой задачи рабочее дерево **чистое**.
+- `git -C /Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix branch --show-current`
+- `git -C /Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix rev-parse --short HEAD`
+- `git -C /Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix status --short`
+
+Не опирайся на старый hash из предыдущих prompt-ов: он может уже не соответствовать текущему дереву.
 
 ## 3. Что уже было исправлено до этого review
 
@@ -60,6 +64,7 @@
 
 - `should_recycle_after_fatal_exception(...)`
 - controlled restart вместо `exit code 1` для части fatal runtime после partial progress
+- `write_summary(...)` пишет summary атомарно через temp file + replace
 - `total_processed` в summary
 - запись watchdog summary перед `os._exit(75)`
 - planned recycle больше не пишет misleading `fatal_error`
@@ -74,6 +79,7 @@
 Что уже добавлено/изменено:
 
 - `load_batch_summary_excerpt(...)`
+- `merge_batch_outputs_if_present(...)`
 - coordinator вытаскивает из batch summary:
   - `summary_exit_code`
   - `fatal_error`
@@ -83,13 +89,14 @@
 - отдельный `controlled_restart_count` на уровне batch state
 - лимит `batches.max_controlled_restarts`
 - fallback чтения `total_processed` из `summary["total"]`
+- partial `results_manifest.json` и `summary.json` теперь мёржатся в aggregate даже при terminal failure / restart-limit-exceeded, если файлы читаемы
 
 ### 3.3 Windows smoke configs
 
 Ключевые файлы:
 
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.pc10.1worker.200.json`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.pc10.4workers.500.json`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.pc10.1worker.200.json`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.pc10.4workers.500.json`
 
 Что важно:
 
@@ -186,7 +193,7 @@
 Оцени готовность именно этого запуска:
 
 - config:
-  - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.pc10.1worker.200.json`
+  - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.pc10.1worker.200.json`
 - manifest:
   - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/data_shards/windows_pc10_smoke_20260518_200/manifest.json`
 - batch:
@@ -216,26 +223,26 @@
 ### Config / data / runbooks
 
 - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.json`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.4workers.json`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.pc10.4workers.500.json`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.pc10.1worker.200.json`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/WINDOWS_PC10_200_SMOKE_RUNBOOK.md`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/WINDOWS_PC10_500_RUNBOOK.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.4workers.json`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.pc10.4workers.500.json`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.pc10.1worker.200.json`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/windows/WINDOWS_PC10_200_SMOKE_RUNBOOK.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/windows/WINDOWS_PC10_500_RUNBOOK.md`
 - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/README.md`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/WINDOWS_PORT_REVIEW.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/windows/WINDOWS_PORT_REVIEW.md`
 
 ### Additional docs
 
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/MD/CONNECTION_LEAK_ANALYSIS.md`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/MD/CRITICAL_ISSUES_REPORT.md`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/VIDEO_JSON_STORAGE_LAYOUT.txt`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/analysis/CONNECTION_LEAK_ANALYSIS.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/analysis/CRITICAL_ISSUES_REPORT.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/architecture/VIDEO_JSON_STORAGE_LAYOUT.txt`
 
 ## 6. Что не нужно делать
 
 - не уходи в общие советы без привязки к коду;
 - не делай упор на hygiene credentials;
 - не игнорируй Windows-specific behavior;
-- не опирайся только на старый `WINDOWS_PORT_REVIEW.md` — смотри текущий код;
+- не опирайся только на старый `docs/windows/WINDOWS_PORT_REVIEW.md` — смотри текущий код;
 - не предполагай, что свежие fixes уже автоматически правильные: их надо заново доказать.
 
 ## 7. Требуемый формат ответа
@@ -270,4 +277,3 @@
 - готова ли ветка `windows` на commit `2854b40` к Windows smoke run на одном worker;
 - не осталось ли ошибок в логике resume / restart / coordinator;
 - и не спрятали ли последние fixes реальную проблему прошлых batch failures.
-

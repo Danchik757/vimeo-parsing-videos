@@ -32,8 +32,8 @@
 - `scripts/preflight_parse.py`
 - `scripts/offload_downloads.py`
 - `scripts/create_server_assignments.py`
-- `config.parse-3.profile.json`
-- `VIDEO_JSON_STORAGE_LAYOUT.txt`
+- `configs/parse3/config.parse-3.profile.json`
+- `docs/architecture/VIDEO_JSON_STORAGE_LAYOUT.txt`
 - `PARSE3_RUNTIME_NETWORK_REFERENCE.md`
 
 ## Что уже известно про текущую логику

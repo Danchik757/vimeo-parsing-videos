@@ -10,7 +10,7 @@
 Использовать:
 
 - branch: `windows`
-- config: `config.windows.pc10.1worker.200.json`
+- config: `configs/windows/config.windows.pc10.1worker.200.json`
 - manifest: `data_shards\windows_pc10_smoke_20260518_200\manifest.json`
 
 Тестовый набор:
@@ -107,7 +107,7 @@ Remove-Item \\sciencestorage\cc\vimeo_Datasets\_write_test -Force
 ### Файлы smoke-run
 
 ```powershell
-Test-Path .\config.windows.pc10.1worker.200.json
+Test-Path .\configs\windows\config.windows.pc10.1worker.200.json
 Test-Path .\data_shards\windows_pc10_smoke_20260518_200\manifest.json
 Test-Path .\data_shards\windows_pc10_smoke_20260518_200\batch_0001.json
 ```
@@ -117,7 +117,7 @@ Test-Path .\data_shards\windows_pc10_smoke_20260518_200\batch_0001.json
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe scripts\preflight_parse.py --config config.windows.pc10.1worker.200.json --manifest data_shards\windows_pc10_smoke_20260518_200\manifest.json
+.\venv\Scripts\python.exe scripts\preflight_parse.py --config configs\windows\config.windows.pc10.1worker.200.json --manifest data_shards\windows_pc10_smoke_20260518_200\manifest.json
 ```
 
 Что должно быть по смыслу:
@@ -140,7 +140,7 @@ $env:PYTHONIOENCODING = "utf-8"
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe scripts\offload_downloads.py --config config.windows.pc10.1worker.200.json --limit 1
+.\venv\Scripts\python.exe scripts\offload_downloads.py --config configs\windows\config.windows.pc10.1worker.200.json --limit 1
 ```
 
 Если локальных файлов еще нет, это нормально: важно, чтобы скрипт стартовал без path/permission crash.
@@ -152,7 +152,7 @@ $env:PYTHONIOENCODING = "utf-8"
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe run_assigned_shards.py --config config.windows.pc10.1worker.200.json --manifest data_shards\windows_pc10_smoke_20260518_200\manifest.json --workers 1
+.\venv\Scripts\python.exe run_assigned_shards.py --config configs\windows\config.windows.pc10.1worker.200.json --manifest data_shards\windows_pc10_smoke_20260518_200\manifest.json --workers 1
 ```
 
 ## 8. Как смотреть лог во время работы
@@ -206,7 +206,7 @@ Get-ChildItem .\output\runs\pc10\windows-1worker-200\videos\downloaded -Recurse 
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe scripts\offload_downloads.py --config config.windows.pc10.1worker.200.json --limit 5
+.\venv\Scripts\python.exe scripts\offload_downloads.py --config configs\windows\config.windows.pc10.1worker.200.json --limit 5
 ```
 
 Потом проверить:
@@ -230,7 +230,7 @@ Get-ChildItem \\sciencestorage\cc\vimeo_Datasets\downloaded | Select-Object -Fir
 Если этот прогон успешен, следующий шаг:
 
 1. оставить тот же Windows host;
-2. перейти на `config.windows.pc10.4workers.500.json`;
+2. перейти на `configs/windows/config.windows.pc10.4workers.500.json`;
 3. сначала снова сделать `preflight_parse.py`;
 4. потом `run_assigned_shards.py --workers 1 --max-batches 1`;
 5. и только потом полный `--workers 4`.
@@ -252,4 +252,3 @@ Smoke считаем успешным, если:
 ```powershell
 Get-Process chrome, chromedriver, msedge -ErrorAction SilentlyContinue
 ```
-

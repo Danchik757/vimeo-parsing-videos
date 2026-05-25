@@ -1,14 +1,14 @@
 {
-  "base_config": "config.json",
+  "base_config": "../../config.json",
   "files": {
-    "source_json": "need_parse_unique.json",
-    "videos_dir": "output/runs/windows-4workers/videos",
-    "jsons_dir": "output/runs/windows-4workers/jsons",
-    "logs_dir": "output/runs/windows-4workers",
-    "failed_downloads": "output/runs/windows-4workers/failed_downloads.json",
-    "log_file": "output/runs/windows-4workers/download.log",
-    "summary_file": "output/runs/windows-4workers/summary.json",
-    "results_file": "output/runs/windows-4workers/results_manifest.json"
+    "source_json": "../../need_parse_unique.json",
+    "videos_dir": "../../output/runs/windows-4workers/videos",
+    "jsons_dir": "../../output/runs/windows-4workers/jsons",
+    "logs_dir": "../../output/runs/windows-4workers",
+    "failed_downloads": "../../output/runs/windows-4workers/failed_downloads.json",
+    "log_file": "../../output/runs/windows-4workers/download.log",
+    "summary_file": "../../output/runs/windows-4workers/summary.json",
+    "results_file": "../../output/runs/windows-4workers/results_manifest.json"
   },
   "telegram": {
     "source_address": "",
@@ -82,15 +82,15 @@
   },
   "resume": {
     "enabled": true,
-    "state_file": "output/runs/windows-4workers/resume_state.json",
+    "state_file": "../../output/runs/windows-4workers/resume_state.json",
     "skip_completed_files": true,
     "resume_partial_downloads": true
   },
   "offload": {
     "enabled": false,
     "storage_root": "",
-    "registry_file": "output/runs/windows-4workers/offload_registry.json",
-    "log_file": "output/runs/windows-4workers/offload.log",
+    "registry_file": "../../output/runs/windows-4workers/offload_registry.json",
+    "log_file": "../../output/runs/windows-4workers/offload.log",
     "scan_interval_seconds": 600,
     "min_file_age_seconds": 30,
     "delete_local_video_after_upload": false,

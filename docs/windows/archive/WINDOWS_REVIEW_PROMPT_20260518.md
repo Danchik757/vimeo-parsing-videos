@@ -58,8 +58,8 @@ HEAD commit на момент постановки задачи:
 ```text
  M download_vimeo_seleniumbase_v3.py
  M run_assigned_shards.py
-?? WINDOWS_PC10_200_SMOKE_RUNBOOK.md
-?? config.windows.pc10.1worker.200.json
+?? docs/windows/WINDOWS_PC10_200_SMOKE_RUNBOOK.md
+?? configs/windows/config.windows.pc10.1worker.200.json
 ?? data_shards/windows_pc10_smoke_20260518_200/
 ```
 
@@ -159,9 +159,9 @@ Review должен обязательно включать эти локаль�
 ### Конфиги и smoke-артефакты
 
 - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.json`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.4workers.json`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.pc10.4workers.500.json`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.pc10.1worker.200.json`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.4workers.json`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.pc10.4workers.500.json`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.pc10.1worker.200.json`
 - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/data_shards/windows_pc10_smoke_20260518_200/manifest.json`
 - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/data_shards/windows_pc10_smoke_20260518_200/batch_0001.json`
 - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/data_shards/windows_pc10_smoke_20260518_200/need_parse_unique.remaining_after_linux_progress_20260511.first200.json`
@@ -169,12 +169,12 @@ Review должен обязательно включать эти локаль�
 ### Документация и предыдущий review
 
 - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/README.md`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/WINDOWS_PORT_REVIEW.md`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/WINDOWS_PC10_200_SMOKE_RUNBOOK.md`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/WINDOWS_PC10_500_RUNBOOK.md`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/MD/CONNECTION_LEAK_ANALYSIS.md`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/MD/CRITICAL_ISSUES_REPORT.md`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/VIDEO_JSON_STORAGE_LAYOUT.txt`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/windows/WINDOWS_PORT_REVIEW.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/windows/WINDOWS_PC10_200_SMOKE_RUNBOOK.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/windows/WINDOWS_PC10_500_RUNBOOK.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/analysis/CONNECTION_LEAK_ANALYSIS.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/analysis/CRITICAL_ISSUES_REPORT.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/architecture/VIDEO_JSON_STORAGE_LAYOUT.txt`
 
 ## 7. Что именно нужно проверить по существу
 
@@ -226,7 +226,7 @@ Review должен обязательно включать эти локаль�
 Нужно понять:
 
 - нет ли утечки Chrome/chromedriver процессов после controlled restart и stall path;
-- не осталась ли проблема, уже описанная в `WINDOWS_PORT_REVIEW.md`;
+- не осталась ли проблема, уже описанная в `docs/windows/WINDOWS_PORT_REVIEW.md`;
 - не ухудшает ли новый патч cleanup semantics;
 - насколько надёжен текущий Windows path при серии controlled restart'ов.
 
@@ -265,7 +265,7 @@ Review должен обязательно включать эти локаль�
 
 - `1 worker`
 - `200 videos`
-- config: `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.pc10.1worker.200.json`
+- config: `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.pc10.1worker.200.json`
 - manifest: `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/data_shards/windows_pc10_smoke_20260518_200/manifest.json`
 
 Нужно ответить:
@@ -280,7 +280,7 @@ Review должен обязательно включать эти локаль�
 - не предлагай удалять credentials из репозитория;
 - не концентрируй review на security hygiene credentials;
 - не уходи в общие советы уровня “надо больше логов” без привязки к конкретным местам;
-- не ограничивайся уже существующим `WINDOWS_PORT_REVIEW.md` — проверь, что изменилось после него;
+- не ограничивайся уже существующим `docs/windows/WINDOWS_PORT_REVIEW.md` — проверь, что изменилось после него;
 - не делай вид, что проблема уже решена, если она только замаскирована.
 
 ## 9. Ожидаемый формат ответа
@@ -317,8 +317,8 @@ Review должен обязательно включать эти локаль�
 
 И отдельно оцени новые Windows smoke-файлы:
 
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/config.windows.pc10.1worker.200.json`
-- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/WINDOWS_PC10_200_SMOKE_RUNBOOK.md`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/configs/windows/config.windows.pc10.1worker.200.json`
+- `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/docs/windows/WINDOWS_PC10_200_SMOKE_RUNBOOK.md`
 - `/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/data_shards/windows_pc10_smoke_20260518_200/`
 
 Главная цель review:

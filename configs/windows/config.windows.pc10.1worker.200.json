@@ -1,14 +1,14 @@
 {
   "base_config": "config.windows.4workers.json",
   "files": {
-    "source_json": "data_shards/windows_pc10_smoke_20260518_200/need_parse_unique.remaining_after_linux_progress_20260511.first200.json",
-    "videos_dir": "output/runs/pc10/windows-1worker-200/videos",
-    "jsons_dir": "output/runs/pc10/windows-1worker-200/jsons",
-    "logs_dir": "output/runs/pc10/windows-1worker-200",
-    "failed_downloads": "output/runs/pc10/windows-1worker-200/failed_downloads.json",
-    "log_file": "output/runs/pc10/windows-1worker-200/download.log",
-    "summary_file": "output/runs/pc10/windows-1worker-200/summary.json",
-    "results_file": "output/runs/pc10/windows-1worker-200/results_manifest.json"
+    "source_json": "../../data_shards/windows_pc10_smoke_20260518_200/need_parse_unique.remaining_after_linux_progress_20260511.first200.json",
+    "videos_dir": "../../output/runs/pc10/windows-1worker-200/videos",
+    "jsons_dir": "../../output/runs/pc10/windows-1worker-200/jsons",
+    "logs_dir": "../../output/runs/pc10/windows-1worker-200",
+    "failed_downloads": "../../output/runs/pc10/windows-1worker-200/failed_downloads.json",
+    "log_file": "../../output/runs/pc10/windows-1worker-200/download.log",
+    "summary_file": "../../output/runs/pc10/windows-1worker-200/summary.json",
+    "results_file": "../../output/runs/pc10/windows-1worker-200/results_manifest.json"
   },
   "runtime": {
     "job_name": "pc10-windows-1worker-200",
@@ -20,8 +20,8 @@
   "offload": {
     "enabled": true,
     "storage_root": "\\\\sciencestorage\\cc\\vimeo_Datasets",
-    "registry_file": "output/runs/pc10/windows-1worker-200/offload_registry.json",
-    "log_file": "output/runs/pc10/windows-1worker-200/offload.log",
+    "registry_file": "../../output/runs/pc10/windows-1worker-200/offload_registry.json",
+    "log_file": "../../output/runs/pc10/windows-1worker-200/offload.log",
     "scan_interval_seconds": 300,
     "min_file_age_seconds": 60,
     "delete_local_video_after_upload": false,

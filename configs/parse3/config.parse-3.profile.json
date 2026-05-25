@@ -1,14 +1,14 @@
 {
   "secrets_file": "config.parse-3.secrets.local.json",
   "files": {
-    "source_json": "need_parse_unique.json",
-    "videos_dir": "output/runs/parse-3/videos",
-    "jsons_dir": "output/runs/parse-3/jsons",
-    "logs_dir": "output/runs/parse-3",
-    "failed_downloads": "output/runs/parse-3/failed_downloads.json",
-    "log_file": "output/runs/parse-3/download.log",
-    "summary_file": "output/runs/parse-3/summary.json",
-    "results_file": "output/runs/parse-3/results_manifest.json"
+    "source_json": "../../need_parse_unique.json",
+    "videos_dir": "../../output/runs/parse-3/videos",
+    "jsons_dir": "../../output/runs/parse-3/jsons",
+    "logs_dir": "../../output/runs/parse-3",
+    "failed_downloads": "../../output/runs/parse-3/failed_downloads.json",
+    "log_file": "../../output/runs/parse-3/download.log",
+    "summary_file": "../../output/runs/parse-3/summary.json",
+    "results_file": "../../output/runs/parse-3/results_manifest.json"
   },
   "telegram": {
     "enabled": true,
@@ -77,15 +77,15 @@
   },
   "resume": {
     "enabled": true,
-    "state_file": "output/runs/parse-3/resume_state.json",
+    "state_file": "../../output/runs/parse-3/resume_state.json",
     "skip_completed_files": true,
     "resume_partial_downloads": true
   },
   "offload": {
     "enabled": true,
     "storage_root": "/29d_kon/mount/mimas/vimeo/2025scraped/parse-3",
-    "registry_file": "output/runs/parse-3/offload_registry.json",
-    "log_file": "output/runs/parse-3/offload.log",
+    "registry_file": "../../output/runs/parse-3/offload_registry.json",
+    "log_file": "../../output/runs/parse-3/offload.log",
     "scan_interval_seconds": 600,
     "min_file_age_seconds": 30,
     "delete_local_video_after_upload": true,

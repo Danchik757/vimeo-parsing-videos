@@ -596,7 +596,7 @@ rm -f /29d_kon/mount/mimas/vimeo/2025scraped/parse-3/.write_test
 cd /29d_kon/projects/vimeo-parsing-videos
 source venv/bin/activate
 python3 scripts/preflight_parse.py \
-  --config config.parse-3.profile.json \
+  --config configs/parse3/config.parse-3.profile.json \
   --manifest data_shards/server_assignments_10000/parse-3/manifest.json
 ```
 
@@ -609,7 +609,7 @@ tmux new -s parse3-parser
 cd /29d_kon/projects/vimeo-parsing-videos
 source venv/bin/activate
 python run_assigned_shards.py \
-  --config config.parse-3.profile.json \
+  --config configs/parse3/config.parse-3.profile.json \
   --manifest data_shards/server_assignments_10000/parse-3/manifest.json \
   --workers 10
 ```
@@ -620,7 +620,7 @@ python run_assigned_shards.py \
 tmux new -s parse3-offload
 cd /29d_kon/projects/vimeo-parsing-videos
 source venv/bin/activate
-python scripts/offload_downloads.py --config config.parse-3.profile.json --watch --delete-local-video
+python scripts/offload_downloads.py --config configs/parse3/config.parse-3.profile.json --watch --delete-local-video
 ```
 
 ## Безопасная остановка

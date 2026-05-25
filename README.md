@@ -13,9 +13,9 @@
   - `telegram`
   - `workers.api_pool`
 - tracked Windows config для запуска 4 worker-ов:
-  - `config.windows.4workers.json`
+  - `configs/windows/config.windows.4workers.json`
 - отдельный Windows runbook:
-  - `WINDOWS_4WORKERS_RUNBOOK.md`
+  - `docs/windows/WINDOWS_4WORKERS_RUNBOOK.md`
 
 На момент написания этого README основной рабочий вариант в репозитории собран вокруг:
 
@@ -61,14 +61,39 @@
 
 - worker может сам пережидать socket pressure перед API/download стадиями;
 - worker может уходить в controlled restart после заданного числа обработанных URL;
-- в `config.windows.4workers.json` по умолчанию стоит `workers.restart_after_processed = 100`;
-- `config.windows.4workers.json` наследует те же credentials, что использовались в `config.parse-1.secrets.json`, но меняет runtime-пути и Windows-specific поведение;
+- в `configs/windows/config.windows.4workers.json` по умолчанию стоит `workers.restart_after_processed = 100`;
+- `configs/windows/config.windows.4workers.json` наследует те же credentials, что использовались в `config.parse-1.secrets.json`, но меняет runtime-пути и Windows-specific поведение;
 - stall recovery убивает весь process tree worker-а, а не только Python process;
 - Windows config убирает Linux-only routing/interface assumptions.
 
 Текущий branch исторически использовался как hybrid между parse-1 production логикой и parse-3 серверной раскладкой.
 
-## 3. Основная карта репозитория
+## 3. Структура папок
+
+После cleanup ветки `windows` структура разделена по ролям:
+
+- `configs/windows/`
+  Windows runtime-конфиги и smoke/production профили.
+- `configs/parse3/`
+  Parse-3 профиль и example secrets.
+- `docs/windows/`
+  Windows runbook'и, prompts и review-материалы.
+- `docs/windows/archive/`
+  Исторические prompts, которые оставлены только для справки.
+- `docs/parse3/`
+  Parse-3 runbook и network/runtime reference.
+- `docs/analysis/`
+  Аналитические документы по connection leaks и критическим проблемам.
+- `docs/architecture/`
+  Документы по layout хранения и общей структуре артефактов.
+- `scripts/`
+  Операционные утилиты: preflight, offload, shard creation, metrics.
+- `data_shards/`
+  Разрезанные URL-batch'и и manifests.
+- корень репозитория
+  Только core runtime-код, базовый `config.json`, master URL lists и `README.md`.
+
+## 4. Основная карта репозитория
 
 ### Главные entrypoint-файлы
 
@@ -114,13 +139,13 @@
 
 ### Специализированная документация
 
-- `MD/PARSE3_RUNTIME_NETWORK_REFERENCE.md`
-- `MD/PARSE3_HYBRID_FROM_PARSE1_RUNBOOK.md`
-- `VIDEO_JSON_STORAGE_LAYOUT.txt`
-- `MD/CONNECTION_LEAK_ANALYSIS.md`
-- `MD/CRITICAL_ISSUES_REPORT.md`
+- `docs/parse3/PARSE3_RUNTIME_NETWORK_REFERENCE.md`
+- `docs/parse3/PARSE3_HYBRID_FROM_PARSE1_RUNBOOK.md`
+- `docs/architecture/VIDEO_JSON_STORAGE_LAYOUT.txt`
+- `docs/analysis/CONNECTION_LEAK_ANALYSIS.md`
+- `docs/analysis/CRITICAL_ISSUES_REPORT.md`
 
-## 4. Как устроен поток выполнения
+## 5. Как устроен поток выполнения
 
 ### 4.1 Исходный список URL
 
@@ -195,7 +220,7 @@
 3. записывает `offload_registry.json`;
 4. при включенной опции удаляет локальный media-файл.
 
-## 5. Ключевые runtime-артефакты
+## 6. Ключевые runtime-артефакты
 
 Типовой run root:
 
@@ -215,7 +240,7 @@
 - `workers/aggregate_summary.json`
 - `shards/batch_XXXX/`
 
-## 6. Resume и восстановление после падения/отключения питания
+## 7. Resume и восстановление после падения/отключения питания
 
 Это одна из самых важных частей кода.
 
@@ -237,7 +262,7 @@
 2. снова запустить тот же coordinator command;
 3. позволить worker'ам продолжить из `resume_state.json`.
 
-## 7. Как устроены итоговые статусы URL
+## 8. Как устроены итоговые статусы URL
 
 В коде важна не только категория "скачано / не скачано", а более точная классификация.
 
@@ -263,7 +288,7 @@ URL, где открылся transcript/modal path вместо нормальн
 
 Это отдельный terminal/inspection bucket.
 
-## 8. Как правильно чистить исходный список URL
+## 9. Как правильно чистить исходный список URL
 
 Это критически важный operational вопрос.
 
@@ -290,7 +315,7 @@ URL, где открылся transcript/modal path вместо нормальн
 
 - новый retry/remainder список = исходный input minus downloaded minus no_links minus transcript_modal
 
-## 9. Проблема с большим количеством подключений
+## 10. Проблема с большим количеством подключений
 
 Это одна из главных оставшихся production-проблем.
 
@@ -337,7 +362,7 @@ URL, где открылся transcript/modal path вместо нормальн
 
 То есть проблема не "исчезла", а частично сдерживается текущими ограничителями.
 
-## 10. Linux-specific зависимости
+## 11. Linux-specific зависимости
 
 Текущий production runtime сильно ориентирован на Linux.
 
@@ -362,22 +387,22 @@ Main runtime path в этой ветке уже адаптирован под Wi
 - `scripts/*.sh`, Linux socket metrics и interface-bound routing на Windows по-прежнему не являются рабочим runtime path;
 - offload по умолчанию в Windows profile выключен, пока не будет подтвержден storage path/layout на новой машине.
 
-## 11. Что смотреть в первую очередь новому разработчику
+## 12. Что смотреть в первую очередь новому разработчику
 
 Если нужно быстро понять код, читать в таком порядке:
 
 1. этот `README.md`
-2. `config.windows.4workers.json`
+2. `configs/windows/config.windows.4workers.json`
 3. `run_assigned_shards.py`
 4. `download_vimeo_seleniumbase_v3.py`
 5. `result_exports.py`
 6. `scripts/preflight_parse.py`
 7. `scripts/offload_downloads.py`
-8. `VIDEO_JSON_STORAGE_LAYOUT.txt`
-9. `MD/PARSE3_RUNTIME_NETWORK_REFERENCE.md`
-10. `MD/WINDOWS_PORTING_CHAT_PROMPT.md`
+8. `docs/architecture/VIDEO_JSON_STORAGE_LAYOUT.txt`
+9. `docs/parse3/PARSE3_RUNTIME_NETWORK_REFERENCE.md`
+10. `docs/windows/WINDOWS_PORTING_CHAT_PROMPT.md`
 
-## 12. Что нужно помнить при переносе или рефакторинге
+## 13. Что нужно помнить при переносе или рефакторинге
 
 - Не ломать resume state.
 - Не ломать classification URL results.

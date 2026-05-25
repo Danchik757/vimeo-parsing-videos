@@ -2,7 +2,7 @@
 
 Целевой host:
 - код лежит в `C:\Users\msu_cc\Desktop\work\29d_kon\parsing`
-- runtime config: `config.windows.pc10.4workers.500.json`
+- runtime config: `configs/windows/config.windows.pc10.4workers.500.json`
 - manifest на `500` URL/batch: `data_shards\recovery_remaining_20260511_500\manifest.json`
 
 Storage layout:
@@ -72,7 +72,7 @@ Remove-Item \\sciencestorage\cc\vimeo_Datasets\_write_test -Force
 
 Проверка config и manifest:
 ```powershell
-Test-Path .\config.windows.pc10.4workers.500.json
+Test-Path .\configs\windows\config.windows.pc10.4workers.500.json
 Test-Path .\data_shards\recovery_remaining_20260511_500\manifest.json
 ```
 
@@ -80,14 +80,14 @@ Test-Path .\data_shards\recovery_remaining_20260511_500\manifest.json
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe scripts\preflight_parse.py --config config.windows.pc10.4workers.500.json --manifest data_shards\recovery_remaining_20260511_500\manifest.json
+.\venv\Scripts\python.exe scripts\preflight_parse.py --config configs\windows\config.windows.pc10.4workers.500.json --manifest data_shards\recovery_remaining_20260511_500\manifest.json
 ```
 
 Быстрый smoke offload без watch:
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe scripts\offload_downloads.py --config config.windows.pc10.4workers.500.json --limit 1
+.\venv\Scripts\python.exe scripts\offload_downloads.py --config configs\windows\config.windows.pc10.4workers.500.json --limit 1
 ```
 
 ## Что запускать
@@ -96,21 +96,21 @@ Parser:
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe run_assigned_shards.py --config config.windows.pc10.4workers.500.json --manifest data_shards\recovery_remaining_20260511_500\manifest.json --workers 4
+.\venv\Scripts\python.exe run_assigned_shards.py --config configs\windows\config.windows.pc10.4workers.500.json --manifest data_shards\recovery_remaining_20260511_500\manifest.json --workers 4
 ```
 
 Offloader:
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe scripts\offload_downloads.py --config config.windows.pc10.4workers.500.json --watch
+.\venv\Scripts\python.exe scripts\offload_downloads.py --config configs\windows\config.windows.pc10.4workers.500.json --watch
 ```
 
 Preflight:
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe scripts\preflight_parse.py --config config.windows.pc10.4workers.500.json --manifest data_shards\recovery_remaining_20260511_500\manifest.json
+.\venv\Scripts\python.exe scripts\preflight_parse.py --config configs\windows\config.windows.pc10.4workers.500.json --manifest data_shards\recovery_remaining_20260511_500\manifest.json
 ```
 
 ## Как запускать парсинг
@@ -119,14 +119,14 @@ $env:PYTHONIOENCODING = "utf-8"
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe run_assigned_shards.py --config config.windows.pc10.4workers.500.json --manifest data_shards\recovery_remaining_20260511_500\manifest.json --workers 1 --max-batches 1
+.\venv\Scripts\python.exe run_assigned_shards.py --config configs\windows\config.windows.pc10.4workers.500.json --manifest data_shards\recovery_remaining_20260511_500\manifest.json --workers 1 --max-batches 1
 ```
 
 Если smoke проходит, запускать основной run:
 ```powershell
 cd C:\Users\msu_cc\Desktop\work\29d_kon\parsing
 $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe run_assigned_shards.py --config config.windows.pc10.4workers.500.json --manifest data_shards\recovery_remaining_20260511_500\manifest.json --workers 4
+.\venv\Scripts\python.exe run_assigned_shards.py --config configs\windows\config.windows.pc10.4workers.500.json --manifest data_shards\recovery_remaining_20260511_500\manifest.json --workers 4
 ```
 
 Рекомендуемый порядок:

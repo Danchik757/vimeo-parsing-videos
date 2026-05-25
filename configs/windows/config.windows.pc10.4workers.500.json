@@ -1,0 +1,33 @@
+{
+  "base_config": "config.windows.4workers.json",
+  "files": {
+    "source_json": "../../data_shards/recovery_remaining_20260511_500/need_parse_unique.remaining_after_linux_progress_20260511.json",
+    "videos_dir": "../../output/runs/pc10/windows-4workers-500/videos",
+    "jsons_dir": "../../output/runs/pc10/windows-4workers-500/jsons",
+    "logs_dir": "../../output/runs/pc10/windows-4workers-500",
+    "failed_downloads": "../../output/runs/pc10/windows-4workers-500/failed_downloads.json",
+    "log_file": "../../output/runs/pc10/windows-4workers-500/download.log",
+    "summary_file": "../../output/runs/pc10/windows-4workers-500/summary.json",
+    "results_file": "../../output/runs/pc10/windows-4workers-500/results_manifest.json"
+  },
+  "runtime": {
+    "job_name": "pc10-windows-4workers-500"
+  },
+  "telegram": {
+    "enabled": false
+  },
+  "offload": {
+    "enabled": true,
+    "storage_root": "\\\\sciencestorage\\cc\\vimeo_Datasets",
+    "registry_file": "../../output/runs/pc10/windows-4workers-500/offload_registry.json",
+    "log_file": "../../output/runs/pc10/windows-4workers-500/offload.log",
+    "scan_interval_seconds": 300,
+    "min_file_age_seconds": 60,
+    "delete_local_video_after_upload": false,
+    "validate_with_ffprobe": false,
+    "ffprobe_bin": "ffprobe"
+  },
+  "batches": {
+    "max_controlled_restarts": 12
+  }
+}

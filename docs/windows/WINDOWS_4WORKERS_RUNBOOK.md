@@ -4,7 +4,7 @@
 
 ## Что использовать
 
-- config: `config.windows.4workers.json`
+- config: `configs/windows/config.windows.4workers.json`
 - branch: `windows`
 - coordinator: `run_assigned_shards.py`
 - worker: `download_vimeo_seleniumbase_v3.py`
@@ -52,19 +52,19 @@ py -3.11 -m venv venv
 ## Быстрый smoke-check
 
 ```powershell
-.\venv\Scripts\python.exe scripts\preflight_parse.py --config config.windows.4workers.json
+.\venv\Scripts\python.exe scripts\preflight_parse.py --config configs\windows\config.windows.4workers.json
 ```
 
 ## Полный запуск на master list
 
 ```powershell
-.\venv\Scripts\python.exe run_assigned_shards.py --config config.windows.4workers.json --manifest data_shards\server_assignments_10000\parse-3\manifest.json --workers 4
+.\venv\Scripts\python.exe run_assigned_shards.py --config configs\windows\config.windows.4workers.json --manifest data_shards\server_assignments_10000\parse-3\manifest.json --workers 4
 ```
 
 ## Если нужен локальный single-worker smoke
 
 ```powershell
-.\venv\Scripts\python.exe download_vimeo_seleniumbase_v3.py --config config.windows.4workers.json
+.\venv\Scripts\python.exe download_vimeo_seleniumbase_v3.py --config configs\windows\config.windows.4workers.json
 ```
 
 ## Что проверить перед production run
