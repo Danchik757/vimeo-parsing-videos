@@ -1,0 +1,14 @@
+{
+  "source_remaining": "/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/data_shards/recovery_remaining_20260511_500/need_parse_unique.remaining_after_linux_progress_20260511.json",
+  "smoke50_source": "/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/data_shards/windows_pc10_smoke_20260525_50/need_parse_unique.remaining_after_linux_progress_20260511.first50.json",
+  "removal_mode": "drop_prefix_50",
+  "original_total_urls": 614167,
+  "removed_urls": 50,
+  "remaining_total_urls": 614117,
+  "batch_size": 500,
+  "shard_count": 1229,
+  "generated_files": {
+    "remaining_list": "/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/data_shards/recovery_remaining_after_windows_smoke_20260525_500/need_parse_unique.remaining_after_linux_progress_20260511.after_windows_smoke50_20260525.json",
+    "manifest": "/Users/admin/Documents/LAB/CODECS/PARSING/codex_vimeo_fix/data_shards/recovery_remaining_after_windows_smoke_20260525_500/manifest.json"
+  }
+}
