@@ -1,4 +1,4 @@
-"""Telegram notifications for the Vimeo downloader."""
+"""Notification transports for the Vimeo downloader."""
 
 import argparse
 import atexit
@@ -6,10 +6,14 @@ import html
 import json
 import logging
 import queue
+import re
+import smtplib
 import socket
+import ssl
 import threading
 import time
 from datetime import datetime
+from email.mime.text import MIMEText
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -20,6 +24,8 @@ from config_utils import load_json_config_with_optional_secrets
 
 logger = logging.getLogger(__name__)
 _FORCED_IPV4 = False
+_HTML_BREAK_RE = re.compile(r"<(?:br\s*/?|/p|/div|/li|/pre|/tr|/h[1-6])>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _force_requests_ipv4():
@@ -39,6 +45,68 @@ def _int_or_default(value, default):
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _bool_or_default(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off", ""}:
+        return False
+    return default
+
+
+def _cfg_value(primary_cfg, fallback_cfg, key, default=None):
+    if key in primary_cfg:
+        return primary_cfg.get(key)
+    return fallback_cfg.get(key, default)
+
+
+def _normalize_transport(config):
+    notifications_cfg = config.get("notifications", {}) or {}
+    telegram_cfg = config.get("telegram", {}) or {}
+    email_cfg = config.get("email", {}) or {}
+
+    transport = str(notifications_cfg.get("transport", "")).strip().lower()
+    if transport in {"telegram", "email", "both", "none"}:
+        return transport
+
+    telegram_enabled = bool(telegram_cfg.get("enabled", False))
+    email_enabled = _bool_or_default(email_cfg.get("enabled"), False) or any(
+        str(email_cfg.get(key, "")).strip()
+        for key in ("smtp_host", "smtp_user", "smtp_pass", "mail_addr")
+    )
+
+    if telegram_enabled:
+        return "telegram"
+    if email_enabled:
+        return "email"
+    return "none"
+
+
+def _transport_uses_telegram(transport):
+    return transport in {"telegram", "both"}
+
+
+def _transport_uses_email(transport):
+    return transport in {"email", "both"}
+
+
+def _html_to_plain_text(text):
+    if not text:
+        return ""
+    plain = _HTML_BREAK_RE.sub("\n", str(text))
+    plain = _HTML_TAG_RE.sub("", plain)
+    plain = html.unescape(plain)
+    plain = plain.replace("\r\n", "\n").replace("\r", "\n")
+    plain = re.sub(r"\n{3,}", "\n\n", plain)
+    return plain.strip()
 
 
 class SourceAddressAdapter(HTTPAdapter):
@@ -72,104 +140,110 @@ def build_bounded_http_adapter(source_address=None, pool_connections=1, pool_max
 
 
 class TelegramNotifier:
-    """Send progress and alert notifications via Telegram Bot API."""
+    """Send progress and alert notifications via Telegram, email, or both."""
 
     def __init__(self, config, worker_name=None, job_name=None):
-        telegram_cfg = config.get("telegram", {})
-        runtime_cfg = config.get("runtime", {})
+        telegram_cfg = config.get("telegram", {}) or {}
+        email_cfg = config.get("email", {}) or {}
+        notifications_cfg = config.get("notifications", {}) or {}
+        runtime_cfg = config.get("runtime", {}) or {}
 
-        self.enabled = telegram_cfg.get("enabled", False)
-        self.bot_token = telegram_cfg.get("bot_token", "")
-        self.chat_id = telegram_cfg.get("chat_id", "")
+        self.transport = _normalize_transport(config)
+        self.bot_token = str(telegram_cfg.get("bot_token", "")).strip()
+        self.chat_id = str(telegram_cfg.get("chat_id", "")).strip()
         self.api_base_url = str(
             telegram_cfg.get("api_base_url", "https://api.telegram.org")
         ).rstrip("/")
         self.source_address = str(telegram_cfg.get("source_address", "")).strip() or None
 
-        legacy_every_n = max(1, _int_or_default(telegram_cfg.get("notify_every_n_videos", 1), 1))
+        legacy_every_n = max(1, _int_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_every_n_videos", 1), 1))
         self.notify_download_every_n = max(
             0,
             _int_or_default(
-                telegram_cfg.get("notify_download_every_n_successes", legacy_every_n),
+                _cfg_value(notifications_cfg, telegram_cfg, "notify_download_every_n_successes", legacy_every_n),
                 legacy_every_n,
             ),
         )
         self.notify_coordinator_progress_every_seconds = max(
             0,
             _int_or_default(
-                telegram_cfg.get("notify_coordinator_progress_every_seconds", 0),
+                _cfg_value(notifications_cfg, telegram_cfg, "notify_coordinator_progress_every_seconds", 0),
                 0,
             ),
         )
         self.notify_skip_every_n = max(
             0,
-            _int_or_default(telegram_cfg.get("notify_skip_every_n_processed", 0), 0),
+            _int_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_skip_every_n_processed", 0), 0),
         )
         self.notify_progress_every_n = max(
             0,
-            _int_or_default(telegram_cfg.get("notify_progress_every_n_processed", 5), 5),
+            _int_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_progress_every_n_processed", 5), 5),
         )
         self.notify_progress_min_interval_seconds = max(
             0,
             _int_or_default(
-                telegram_cfg.get("notify_progress_min_interval_seconds", 0),
+                _cfg_value(notifications_cfg, telegram_cfg, "notify_progress_min_interval_seconds", 0),
                 0,
             ),
         )
         self.request_timeout_seconds = max(
             5,
             _int_or_default(
-                telegram_cfg.get("request_timeout_seconds", 30),
+                _cfg_value(notifications_cfg, telegram_cfg, "request_timeout_seconds", 30),
                 30,
             ),
         )
         self.retry_attempts = max(
             1,
             _int_or_default(
-                telegram_cfg.get("retry_attempts", 4),
+                _cfg_value(notifications_cfg, telegram_cfg, "retry_attempts", 4),
                 4,
             ),
         )
         self.retry_delay_seconds = max(
             0,
             _int_or_default(
-                telegram_cfg.get("retry_delay_seconds", 3),
+                _cfg_value(notifications_cfg, telegram_cfg, "retry_delay_seconds", 3),
                 3,
             ),
         )
         self.http_pool_connections = max(
             1,
             _int_or_default(
-                telegram_cfg.get("http_pool_connections", 1),
+                _cfg_value(notifications_cfg, telegram_cfg, "http_pool_connections", 1),
                 1,
             ),
         )
         self.http_pool_maxsize = max(
             1,
             _int_or_default(
-                telegram_cfg.get("http_pool_maxsize", 1),
+                _cfg_value(notifications_cfg, telegram_cfg, "http_pool_maxsize", 1),
                 1,
             ),
         )
-        self.force_ipv4 = bool(telegram_cfg.get("force_ipv4", False))
+        self.force_ipv4 = _bool_or_default(_cfg_value(notifications_cfg, telegram_cfg, "force_ipv4", False), False)
 
-        self.notify_on_start = telegram_cfg.get("notify_on_start", True)
-        self.notify_on_finish = telegram_cfg.get("notify_on_finish", True)
-        self.notify_on_error = telegram_cfg.get("notify_on_error", True)
-        self.notify_on_ip_block = telegram_cfg.get("notify_on_ip_block", True)
-        self.notify_on_stall = telegram_cfg.get("notify_on_stall", True)
-        self.notify_on_heartbeat = telegram_cfg.get("notify_on_heartbeat", True)
-        self.separator_before_worker_messages = telegram_cfg.get(
-            "separator_before_worker_messages",
+        self.notify_on_start = _bool_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_on_start", True), True)
+        self.notify_on_finish = _bool_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_on_finish", True), True)
+        self.notify_on_error = _bool_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_on_error", True), True)
+        self.notify_on_ip_block = _bool_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_on_ip_block", True), True)
+        self.notify_on_stall = _bool_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_on_stall", True), True)
+        self.notify_on_heartbeat = _bool_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_on_heartbeat", True), True)
+        self.separator_before_worker_messages = _bool_or_default(
+            _cfg_value(notifications_cfg, telegram_cfg, "separator_before_worker_messages", False),
             False,
         )
         self.separator_text = str(
-            telegram_cfg.get(
+            _cfg_value(
+                notifications_cfg,
+                telegram_cfg,
                 "separator_text",
                 "------------------------------",
             )
         )
-        separator_types = telegram_cfg.get(
+        separator_types = _cfg_value(
+            notifications_cfg,
+            telegram_cfg,
             "separator_message_types",
             [
                 "start",
@@ -197,13 +271,47 @@ class TelegramNotifier:
         self._sender_thread = None
         self._shutdown_started = False
 
-        if self.enabled and (not self.bot_token or not self.chat_id):
-            logger.warning(
-                "Telegram enabled but bot_token or chat_id is missing. Disabling notifications."
-            )
-            self.enabled = False
+        self.telegram_enabled = _transport_uses_telegram(self.transport)
+        self.email_enabled = _transport_uses_email(self.transport)
 
-        if self.enabled:
+        if self.telegram_enabled and (not self.bot_token or not self.chat_id):
+            logger.warning(
+                "Telegram transport requested but bot_token or chat_id is missing. Disabling Telegram transport."
+            )
+            self.telegram_enabled = False
+
+        self.smtp_host = str(email_cfg.get("smtp_host", "")).strip()
+        self.smtp_port = max(1, _int_or_default(email_cfg.get("smtp_port", 465), 465))
+        self.smtp_ssl = _bool_or_default(email_cfg.get("smtp_ssl"), True)
+        self.smtp_user = str(email_cfg.get("smtp_user", "")).strip()
+        self.smtp_pass = str(email_cfg.get("smtp_pass", "")).strip()
+        self.mail_addr = str(email_cfg.get("mail_addr") or self.smtp_user or "").strip()
+        self.email_subject_prefix = str(email_cfg.get("subject_prefix", "")).strip()
+
+        if self.email_enabled:
+            missing_email_fields = [
+                key
+                for key, value in (
+                    ("smtp_host", self.smtp_host),
+                    ("smtp_port", self.smtp_port),
+                    ("smtp_user", self.smtp_user),
+                    ("smtp_pass", self.smtp_pass),
+                    ("mail_addr", self.mail_addr),
+                )
+                if not value
+            ]
+            if missing_email_fields:
+                logger.warning(
+                    "Email transport requested but config is incomplete (%s). Disabling Email transport.",
+                    ", ".join(missing_email_fields),
+                )
+                self.email_enabled = False
+
+        self.enabled = self.telegram_enabled or self.email_enabled
+        if not self.enabled:
+            return
+
+        if self.telegram_enabled:
             if self.force_ipv4:
                 _force_requests_ipv4()
             self._session = requests.Session()
@@ -214,19 +322,22 @@ class TelegramNotifier:
             )
             self._session.mount("https://", adapter)
             self._session.mount("http://", adapter)
-            self._message_queue = queue.Queue()
-            self._sender_thread = threading.Thread(
-                target=self._sender_loop,
-                name=f"telegram-sender-{self.worker_name or 'main'}",
-                daemon=True,
-            )
-            self._sender_thread.start()
-            atexit.register(self.shutdown)
-            logger.info(
-                "Telegram notifications enabled for %s (chat_id: %s)",
-                self.label,
-                self.chat_id,
-            )
+
+        self._message_queue = queue.Queue()
+        self._sender_thread = threading.Thread(
+            target=self._sender_loop,
+            name=f"notifier-sender-{self.worker_name or 'main'}",
+            daemon=True,
+        )
+        self._sender_thread.start()
+        atexit.register(self.shutdown)
+        logger.info(
+            "Notifications enabled for %s (transport=%s%s%s)",
+            self.label,
+            self.transport,
+            f", chat_id={self.chat_id}" if self.telegram_enabled else "",
+            f", mail_addr={self.mail_addr}" if self.email_enabled else "",
+        )
 
     @property
     def label(self):
@@ -234,10 +345,7 @@ class TelegramNotifier:
             return f"{self.job_name} | {self.worker_name}"
         return self.job_name
 
-    def _deliver_message(self, text, parse_mode="HTML"):
-        if not self.enabled:
-            return False
-
+    def _deliver_telegram_message(self, text, parse_mode="HTML"):
         url = f"{self.api_base_url}/bot{self.bot_token}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
@@ -258,9 +366,7 @@ class TelegramNotifier:
                 if response.status_code == 200:
                     logger.debug("Telegram message sent: %s", text[:80])
                     return True
-                last_error = (
-                    f"status={response.status_code} body={response.text[:300]}"
-                )
+                last_error = f"status={response.status_code} body={response.text[:300]}"
                 logger.warning(
                     "Telegram send attempt %d/%d failed: %s",
                     attempt,
@@ -287,6 +393,63 @@ class TelegramNotifier:
 
         logger.error("Telegram message was not delivered after retries: %s", last_error)
         return False
+
+    def _deliver_email_message(self, text, parse_mode="HTML"):
+        plain = _html_to_plain_text(text)
+        if not plain:
+            plain = self.label
+        lines = [line.strip() for line in plain.splitlines() if line.strip()]
+        subject = lines[0][:140] if lines else self.label
+        if self.email_subject_prefix:
+            subject = f"{self.email_subject_prefix} {subject}".strip()
+
+        msg = MIMEText(plain, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = self.mail_addr
+        msg["To"] = self.mail_addr
+
+        ctx = ssl.create_default_context()
+        last_error = None
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                if self.smtp_ssl:
+                    with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, context=ctx, timeout=self.request_timeout_seconds) as smtp:
+                        smtp.login(self.smtp_user, self.smtp_pass)
+                        smtp.send_message(msg)
+                else:
+                    with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=self.request_timeout_seconds) as smtp:
+                        smtp.starttls(context=ctx)
+                        smtp.login(self.smtp_user, self.smtp_pass)
+                        smtp.send_message(msg)
+                logger.debug("Email notification sent: %s", subject)
+                return True
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Email send attempt %d/%d error: %s",
+                    attempt,
+                    self.retry_attempts,
+                    exc,
+                )
+                if attempt < self.retry_attempts and self.retry_delay_seconds > 0:
+                    time.sleep(self.retry_delay_seconds)
+
+        logger.error("Email notification was not delivered after retries: %s", last_error)
+        return False
+
+    def _deliver_message(self, text, parse_mode="HTML"):
+        if not self.enabled:
+            return False
+
+        ok = True
+        delivered = False
+        if self.telegram_enabled:
+            delivered = True
+            ok = self._deliver_telegram_message(text, parse_mode=parse_mode) and ok
+        if self.email_enabled:
+            delivered = True
+            ok = self._deliver_email_message(text, parse_mode=parse_mode) and ok
+        return delivered and ok
 
     def _sender_loop(self):
         while True:
@@ -328,7 +491,7 @@ class TelegramNotifier:
         )
         completed = done_event.wait(timeout=max_wait)
         if not completed:
-            logger.error("Timed out waiting for Telegram sender thread to finish")
+            logger.error("Timed out waiting for notifier sender thread to finish")
             return False
         return bool(result_holder["ok"])
 
@@ -336,6 +499,8 @@ class TelegramNotifier:
         if not self.enabled:
             return True
         if self._sender_thread is None:
+            if self._session is not None:
+                self._session.close()
             return True
         if self._shutdown_started:
             return not self._sender_thread.is_alive()
@@ -355,6 +520,7 @@ class TelegramNotifier:
             f"{body}\n\n"
             f"time: <code>{_now()}</code>"
         )
+
 
     def _should_send_separator(self, title):
         if not self.separator_before_worker_messages:
@@ -500,7 +666,6 @@ class TelegramNotifier:
         exit_code = stats.get("exit_code", 0)
         fatal_error = stats.get("fatal_error")
         restart_requested = bool(stats.get("restart_requested"))
-        restart_reason = stats.get("restart_reason")
 
         if restart_requested:
             return
@@ -579,16 +744,17 @@ class TelegramNotifier:
 def test_telegram_connection(config, worker_name=None, job_name=None):
     notifier = TelegramNotifier(config, worker_name=worker_name, job_name=job_name)
     if not notifier.enabled:
-        print("❌ Telegram notifications disabled in config")
+        print("❌ Notifications disabled in config")
         return False
 
     try:
         return notifier.notify_custom(
-        "test_message",
-        [
-            "status: <code>ok</code>",
-            "details: <code>telegram bot configuration works</code>",
-        ],
+            "test_message",
+            [
+                f"transport: <code>{html.escape(notifier.transport)}</code>",
+                "status: <code>ok</code>",
+                "details: <code>notification configuration works</code>",
+            ],
             wait=True,
         )
     finally:
@@ -596,7 +762,7 @@ def test_telegram_connection(config, worker_name=None, job_name=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test Telegram notifications.")
+    parser = argparse.ArgumentParser(description="Test parser notifications.")
     parser.add_argument("--config", default="config.json", help="Path to config JSON")
     parser.add_argument("--worker-name", default="", help="Worker label for test message")
     parser.add_argument("--job-name", default="", help="Job label for test message")

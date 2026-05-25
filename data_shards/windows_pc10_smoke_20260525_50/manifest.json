@@ -1,0 +1,21 @@
+{
+  "server_name": "windows-pc10-smoke-20260525-50",
+  "source_json": "need_parse_unique.remaining_after_linux_progress_20260511.first50.json",
+  "batch_size": 25,
+  "shard_count": 2,
+  "total_urls": 50,
+  "batches": [
+    {
+      "batch_number": 1,
+      "filename": "batch_0001.json",
+      "path": "batch_0001.json",
+      "url_count": 25
+    },
+    {
+      "batch_number": 2,
+      "filename": "batch_0002.json",
+      "path": "batch_0002.json",
+      "url_count": 25
+    }
+  ]
+}

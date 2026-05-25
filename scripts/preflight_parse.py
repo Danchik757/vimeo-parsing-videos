@@ -91,6 +91,53 @@ def _fmt_detail(detail):
     return f" | {detail}" if detail else ""
 
 
+def _boolish(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _intish(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def notification_transport(config):
+    notifications_cfg = config.get("notifications", {}) or {}
+    telegram_cfg = config.get("telegram", {}) or {}
+    email_cfg = config.get("email", {}) or {}
+
+    transport = str(notifications_cfg.get("transport", "")).strip().lower()
+    if transport in {"telegram", "email", "both", "none"}:
+        return transport
+
+    if _boolish(telegram_cfg.get("enabled", False)):
+        return "telegram"
+
+    email_enabled = _boolish(email_cfg.get("enabled", False)) or any(
+        str(email_cfg.get(key, "")).strip()
+        for key in ("smtp_host", "smtp_user", "smtp_pass", "mail_addr")
+    )
+    if email_enabled:
+        return "email"
+
+    return "none"
+
+
+def transport_uses_telegram(config):
+    return notification_transport(config) in {"telegram", "both"}
+
+
+def transport_uses_email(config):
+    return notification_transport(config) in {"email", "both"}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Preflight checks before starting a parse run")
     parser.add_argument(
@@ -429,6 +476,9 @@ def check_config_and_paths(config, args, reporter):
     else:
         reporter.warn("secrets", "no layered secrets_file configured")
 
+    transport = notification_transport(config)
+    reporter.pass_("notification.transport", transport)
+
     vimeo_cfg = config.get("vimeo_api", {})
     for key in ("token", "client_id", "secret"):
         if str(vimeo_cfg.get(key, "")).strip():
@@ -437,12 +487,20 @@ def check_config_and_paths(config, args, reporter):
             reporter.fail(f"vimeo_api.{key}", "missing")
 
     telegram_cfg = config.get("telegram", {})
-    if telegram_cfg.get("enabled"):
+    if transport_uses_telegram(config):
         for key in ("bot_token", "chat_id"):
             if str(telegram_cfg.get(key, "")).strip():
                 reporter.pass_(f"telegram.{key}")
             else:
                 reporter.fail(f"telegram.{key}", "missing")
+
+    email_cfg = config.get("email", {})
+    if transport_uses_email(config):
+        for key in ("smtp_host", "smtp_port", "smtp_user", "smtp_pass", "mail_addr"):
+            if str(email_cfg.get(key, "")).strip():
+                reporter.pass_(f"email.{key}")
+            else:
+                reporter.fail(f"email.{key}", "missing")
 
     if bool(config.get("runtime", {}).get("vimeo_authenticated_session", False)):
         login_cfg = config.get("vimeo_login", {})
@@ -506,11 +564,12 @@ def check_config_and_paths(config, args, reporter):
 
 def check_interfaces_and_network(config, reporter):
     reporter.section("Network")
-    telegram_enabled = bool(config.get("telegram", {}).get("enabled", False))
+    telegram_enabled = transport_uses_telegram(config)
+    email_enabled = transport_uses_email(config)
 
     for hostname, _, label, target_kind in TCP_TARGETS:
         if target_kind == "telegram" and not telegram_enabled:
-            reporter.pass_(f"DNS {label}", "skipped because telegram.enabled=false")
+            reporter.pass_(f"DNS {label}", "skipped because transport does not use telegram")
             continue
         ok, detail = check_dns(hostname)
         if ok:
@@ -520,7 +579,7 @@ def check_interfaces_and_network(config, reporter):
 
     for hostname, port, label, target_kind in TCP_TARGETS:
         if target_kind == "telegram" and not telegram_enabled:
-            reporter.pass_(f"TCP {label}", "skipped because telegram.enabled=false")
+            reporter.pass_(f"TCP {label}", "skipped because transport does not use telegram")
             continue
         ok, detail = tcp_connect(hostname, port, timeout=5)
         if ok:
@@ -528,9 +587,25 @@ def check_interfaces_and_network(config, reporter):
         else:
             reporter.fail(f"TCP {label}", detail)
 
+    if email_enabled:
+        email_cfg = config.get("email", {})
+        smtp_host = str(email_cfg.get("smtp_host", "")).strip()
+        smtp_port = _intish(email_cfg.get("smtp_port", 465), 465)
+        if smtp_host:
+            ok, detail = check_dns(smtp_host)
+            if ok:
+                reporter.pass_("DNS SMTP", detail)
+            else:
+                reporter.fail("DNS SMTP", detail)
+            ok, detail = tcp_connect(smtp_host, smtp_port, timeout=5)
+            if ok:
+                reporter.pass_("TCP SMTP", detail)
+            else:
+                reporter.fail("TCP SMTP", detail)
+
     telegram_cfg = config.get("telegram", {})
     source_address = str(telegram_cfg.get("source_address", "")).strip()
-    if source_address:
+    if telegram_enabled and source_address:
         iface = get_interface_for_source_ip(source_address)
         if iface:
             reporter.pass_("telegram source_address", f"{source_address} on {iface}")
@@ -561,11 +636,14 @@ def check_interfaces_and_network(config, reporter):
         else:
             reporter.fail("download interface", detail)
 
-        ok, detail = curl_interface_head(download_interface, "https://api.telegram.org", timeout=10)
-        if ok:
-            reporter.pass_("curl via download interface to Telegram", detail)
+        if telegram_enabled:
+            ok, detail = curl_interface_head(download_interface, "https://api.telegram.org", timeout=10)
+            if ok:
+                reporter.pass_("curl via download interface to Telegram", detail)
+            else:
+                reporter.fail("curl via download interface to Telegram", detail)
         else:
-            reporter.fail("curl via download interface to Telegram", detail)
+            reporter.pass_("curl via download interface to Telegram", "skipped because transport does not use telegram")
 
         ok, detail = curl_interface_head(download_interface, "https://api.vimeo.com", timeout=10)
         if ok:

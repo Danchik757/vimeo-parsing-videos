@@ -1,0 +1,70 @@
+{
+  "base_config": "config.windows.4workers.json",
+  "files": {
+    "source_json": "../../data_shards/windows_pc10_smoke_20260525_50/need_parse_unique.remaining_after_linux_progress_20260511.first50.json",
+    "videos_dir": "../../output/runs/pc10/windows-2workers-50-email/videos",
+    "jsons_dir": "../../output/runs/pc10/windows-2workers-50-email/jsons",
+    "logs_dir": "../../output/runs/pc10/windows-2workers-50-email",
+    "failed_downloads": "../../output/runs/pc10/windows-2workers-50-email/failed_downloads.json",
+    "log_file": "../../output/runs/pc10/windows-2workers-50-email/download.log",
+    "summary_file": "../../output/runs/pc10/windows-2workers-50-email/summary.json",
+    "results_file": "../../output/runs/pc10/windows-2workers-50-email/results_manifest.json"
+  },
+  "runtime": {
+    "job_name": "pc10-windows-2workers-50-email",
+    "worker_count": 2
+  },
+  "notifications": {
+    "transport": "email",
+    "notify_download_every_n_successes": 0,
+    "notify_skip_every_n_processed": 0,
+    "notify_progress_every_n_processed": 0,
+    "notify_progress_min_interval_seconds": 600,
+    "notify_coordinator_progress_every_seconds": 600,
+    "notify_on_start": true,
+    "notify_on_finish": true,
+    "notify_on_error": true,
+    "notify_on_ip_block": true,
+    "notify_on_stall": true,
+    "notify_on_heartbeat": true
+  },
+  "telegram": {
+    "enabled": false
+  },
+  "email": {
+    "enabled": true,
+    "subject_prefix": "[pc10 smoke]"
+  },
+  "settings": {
+    "test_mode": false,
+    "test_limit": 0
+  },
+  "offload": {
+    "enabled": true,
+    "storage_root": "\\\\sciencestorage\\cc\\vimeo_Datasets",
+    "registry_file": "../../output/runs/pc10/windows-2workers-50-email/offload_registry.json",
+    "log_file": "../../output/runs/pc10/windows-2workers-50-email/offload.log",
+    "scan_interval_seconds": 300,
+    "min_file_age_seconds": 60,
+    "delete_local_video_after_upload": false,
+    "validate_with_ffprobe": false,
+    "ffprobe_bin": "ffprobe"
+  },
+  "workers": {
+    "count": 2,
+    "stagger_start_seconds": 15,
+    "restart_after_processed": 0,
+    "consecutive_timeout_failures_before_restart": 2
+  },
+  "watchdog": {
+    "stall_alert_after_seconds": 600,
+    "repeat_alert_every_seconds": 600,
+    "heartbeat_every_seconds": 600,
+    "exit_on_stall": true,
+    "stall_exit_after_seconds": 900
+  },
+  "batches": {
+    "max_batch_retries": 4,
+    "max_controlled_restarts": 6
+  }
+}
