@@ -71,8 +71,27 @@ function Show-RegistrySummary {
     }
 
     $registryObject = $raw | ConvertFrom-Json
-    $items = @($registryObject.PSObject.Properties | ForEach-Object { $_.Value })
-    $uploaded = @($items | Where-Object { $_.status -eq "uploaded" })
+    $itemContainer = $registryObject
+    if ($registryObject.PSObject.Properties.Name -contains "items") {
+        $itemContainer = $registryObject.items
+    }
+
+    $items = @()
+    if ($itemContainer -is [System.Array]) {
+        $items = @($itemContainer)
+    }
+    elseif ($null -ne $itemContainer -and $null -ne $itemContainer.PSObject) {
+        $items = @($itemContainer.PSObject.Properties | ForEach-Object { $_.Value })
+    }
+
+    $uploaded = @(
+        $items | Where-Object {
+            $null -ne $_ -and
+            $null -ne $_.PSObject -and
+            ($_.PSObject.Properties.Name -contains "status") -and
+            $_.status -eq "uploaded"
+        }
+    )
     $uploadedBytes = ($uploaded | Measure-Object file_size_bytes -Sum).Sum
     if ($null -eq $uploadedBytes) {
         $uploadedBytes = 0
