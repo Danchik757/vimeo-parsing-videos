@@ -46,7 +46,7 @@
     "log_file": "../../output/runs/pc10/windows-2workers-500-email/offload.log",
     "scan_interval_seconds": 300,
     "min_file_age_seconds": 60,
-    "delete_local_video_after_upload": false,
+    "delete_local_video_after_upload": true,
     "validate_with_ffprobe": false,
     "ffprobe_bin": "ffprobe"
   },
