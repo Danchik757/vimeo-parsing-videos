@@ -45,13 +45,14 @@ function Get-DirectorySizeGB([string]$Path) {
 
 function Show-RunDirectorySizes {
     param([string]$Root)
-    foreach ($name in @("videos", "shards", "workers", "jsons")) {
+    $rows = foreach ($name in @("videos", "shards", "workers", "jsons")) {
         $path = Join-Path $Root $name
         [pscustomobject]@{
             Dir    = $path
             SizeGB = Get-DirectorySizeGB $path
         }
-    } | Format-Table -AutoSize
+    }
+    $rows | Format-Table -AutoSize
 }
 
 function Show-RegistrySummary {
