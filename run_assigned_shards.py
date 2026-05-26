@@ -24,7 +24,7 @@ from platform_runtime import (
     worker_popen_kwargs,
 )
 from result_exports import write_result_url_lists
-from telegram_notifier import TelegramNotifier
+from telegram_notifier import TelegramNotifier, build_local_disk_lines
 
 
 FINALIZED_STATUSES = {"downloaded", "skipped"}
@@ -778,6 +778,7 @@ def build_progress_lines(state, global_results, active_processes, master_config,
         f"failed_logged: <code>{int(counts.get('failed', 0))}</code>",
         f"batches: <code>completed={completed_batches} running={running_batches} pending={pending_batches} failed={failed_batches}</code>",
     ]
+    lines.extend(build_local_disk_lines(master_config))
     storage_usage = load_offload_storage_usage(master_config, logger=logger)
     if storage_usage is not None:
         lines.append(
@@ -866,15 +867,14 @@ def main():
         worker_name="coordinator",
         job_name=master_config["runtime"]["job_name"],
     )
-    telegram.notify_custom(
-        "Assignment queue start",
-        [
-            f"server: <code>{assignment['server_name']}</code>",
-            f"workers: <code>{worker_count}</code>",
-            f"selected_batches: <code>{len(selected_batches)}</code>",
-            f"manifest: <code>{assignment['manifest_path']}</code>",
-        ],
-    )
+    queue_start_lines = [
+        f"server: <code>{assignment['server_name']}</code>",
+        f"workers: <code>{worker_count}</code>",
+        f"selected_batches: <code>{len(selected_batches)}</code>",
+        f"manifest: <code>{assignment['manifest_path']}</code>",
+    ]
+    queue_start_lines.extend(build_local_disk_lines(master_config))
+    telegram.notify_custom("Assignment queue start", queue_start_lines)
 
     python_bin = sys.executable
     worker_script = PROJECT_ROOT / "download_vimeo_seleniumbase_v3.py"
@@ -1388,23 +1388,25 @@ def main():
     for bucket, path in exported_lists.items():
         logger.info("Exported %s URLs to %s", bucket, path)
 
+    queue_finish_lines = [
+        f"server: <code>{assignment['server_name']}</code>",
+        f"completed_batches: <code>{aggregate_summary['completed_batches']}/{aggregate_summary['total_batches']}</code>",
+        f"running_batches: <code>{aggregate_summary['running_batches']}</code>",
+        f"pending_batches: <code>{aggregate_summary['pending_batches']}</code>",
+        f"downloaded: <code>{aggregate_summary['downloaded']}</code>",
+        f"skipped: <code>{aggregate_summary['skipped']}</code>",
+        f"failed_logged: <code>{aggregate_summary['failed_logged']}</code>",
+        f"summary: <code>{summary_path}</code>",
+        f"results: <code>{results_path}</code>",
+        f"downloaded_urls: <code>{exported_lists['downloaded_original']}</code>",
+        f"not_downloaded_urls: <code>{exported_lists['not_downloaded_downloadable']}</code>",
+        f"no_links_urls: <code>{exported_lists['no_links']}</code>",
+        f"transcript_modal_urls: <code>{exported_lists['transcript_modal']}</code>",
+    ]
+    queue_finish_lines.extend(build_local_disk_lines(master_config))
     telegram.notify_custom(
         "Assignment queue finish",
-        [
-            f"server: <code>{assignment['server_name']}</code>",
-            f"completed_batches: <code>{aggregate_summary['completed_batches']}/{aggregate_summary['total_batches']}</code>",
-            f"running_batches: <code>{aggregate_summary['running_batches']}</code>",
-            f"pending_batches: <code>{aggregate_summary['pending_batches']}</code>",
-            f"downloaded: <code>{aggregate_summary['downloaded']}</code>",
-            f"skipped: <code>{aggregate_summary['skipped']}</code>",
-            f"failed_logged: <code>{aggregate_summary['failed_logged']}</code>",
-            f"summary: <code>{summary_path}</code>",
-            f"results: <code>{results_path}</code>",
-            f"downloaded_urls: <code>{exported_lists['downloaded_original']}</code>",
-            f"not_downloaded_urls: <code>{exported_lists['not_downloaded_downloadable']}</code>",
-            f"no_links_urls: <code>{exported_lists['no_links']}</code>",
-            f"transcript_modal_urls: <code>{exported_lists['transcript_modal']}</code>",
-        ],
+        queue_finish_lines,
         wait=True,
     )
     telegram.shutdown(timeout=10)

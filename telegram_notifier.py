@@ -7,6 +7,7 @@ import json
 import logging
 import queue
 import re
+import shutil
 import smtplib
 import socket
 import ssl
@@ -14,6 +15,7 @@ import threading
 import time
 from datetime import datetime
 from email.mime.text import MIMEText
+from pathlib import Path
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -109,6 +111,61 @@ def _html_to_plain_text(text):
     return plain.strip()
 
 
+def _disk_check_candidate(config):
+    settings_cfg = config.get("settings", {}) or {}
+    files_cfg = config.get("files", {}) or {}
+    candidate = Path(
+        settings_cfg.get("disk_space_check_path")
+        or files_cfg.get("videos_dir")
+        or files_cfg.get("logs_dir")
+        or "."
+    )
+    if candidate.exists() and candidate.is_file():
+        candidate = candidate.parent
+    if not candidate.exists():
+        candidate = candidate.parent if candidate.parent != candidate else Path.cwd()
+    if not candidate.exists():
+        candidate = Path.cwd()
+    return candidate
+
+
+def get_local_disk_snapshot(config):
+    try:
+        candidate = _disk_check_candidate(config)
+        usage = shutil.disk_usage(candidate)
+    except Exception:
+        return None
+
+    gib = float(1024 ** 3)
+    return {
+        "path": str(candidate),
+        "total_bytes": int(usage.total),
+        "used_bytes": int(usage.used),
+        "free_bytes": int(usage.free),
+        "total_gb": round(usage.total / gib, 2),
+        "used_gb": round(usage.used / gib, 2),
+        "free_gb": round(usage.free / gib, 2),
+    }
+
+
+def build_local_disk_lines(config, include_path=False):
+    snapshot = get_local_disk_snapshot(config)
+    if not snapshot:
+        return []
+
+    lines = [
+        (
+            "local_disk: "
+            f"<code>free={snapshot['free_gb']:.2f} GB "
+            f"used={snapshot['used_gb']:.2f} GB "
+            f"total={snapshot['total_gb']:.2f} GB</code>"
+        )
+    ]
+    if include_path:
+        lines.append(f"disk_path: <code>{html.escape(snapshot['path'])}</code>")
+    return lines
+
+
 class SourceAddressAdapter(HTTPAdapter):
     """Bind Telegram HTTP sockets to a specific local source IP."""
 
@@ -143,6 +200,7 @@ class TelegramNotifier:
     """Send progress and alert notifications via Telegram, email, or both."""
 
     def __init__(self, config, worker_name=None, job_name=None):
+        self.config = config
         telegram_cfg = config.get("telegram", {}) or {}
         email_cfg = config.get("email", {}) or {}
         notifications_cfg = config.get("notifications", {}) or {}
@@ -572,6 +630,7 @@ class TelegramNotifier:
         ]
         if browser_mode:
             lines.append(f"browser: <code>{html.escape(browser_mode)}</code>")
+        lines.extend(build_local_disk_lines(self.config))
         self.notify_custom("start", lines)
 
     def notify_video_downloaded(
@@ -617,6 +676,7 @@ class TelegramNotifier:
             f"error: <code>{html.escape(str(error_message)[:350])}</code>",
             f"progress: <code>{processed_num}/{total_videos}</code>",
         ]
+        lines.extend(build_local_disk_lines(self.config))
         self.notify_custom("error", lines)
 
     def notify_ip_blocked(self, ip_address, reason):
@@ -653,6 +713,7 @@ class TelegramNotifier:
             lines.append(f"current_video: <code>{html.escape(str(current_video_id))}</code>")
         if current_stage:
             lines.append(f"stage: <code>{html.escape(str(current_stage))}</code>")
+        lines.extend(build_local_disk_lines(self.config))
         self.notify_custom("progress", lines)
 
     def notify_finish(self, stats, wait=False):
@@ -680,6 +741,7 @@ class TelegramNotifier:
         ]
         if fatal_error:
             lines.append(f"fatal: <code>{html.escape(str(fatal_error)[:350])}</code>")
+        lines.extend(build_local_disk_lines(self.config))
         self.notify_custom(title, lines, wait=wait)
 
     def notify_api_error(self, error_code, error_message):
@@ -690,6 +752,7 @@ class TelegramNotifier:
             f"code: <code>{error_code}</code>",
             f"message: <code>{html.escape(str(error_message))}</code>",
         ]
+        lines.extend(build_local_disk_lines(self.config))
         self.notify_custom("api_error", lines)
 
     def notify_stall(
@@ -715,6 +778,7 @@ class TelegramNotifier:
             f"skipped: <code>{skipped}</code>",
             f"failed: <code>{failed}</code>",
         ]
+        lines.extend(build_local_disk_lines(self.config))
         self.notify_custom("stall", lines)
 
     def notify_heartbeat(
@@ -738,6 +802,7 @@ class TelegramNotifier:
             f"stage: <code>{html.escape(str(stage or 'idle'))}</code>",
             f"video_id: <code>{html.escape(str(video_id or '-'))}</code>",
         ]
+        lines.extend(build_local_disk_lines(self.config))
         self.notify_custom("heartbeat", lines)
 
 
