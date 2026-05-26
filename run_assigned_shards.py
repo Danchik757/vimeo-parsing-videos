@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -151,6 +153,50 @@ def load_offload_storage_usage(config, logger=None):
             continue
 
     return {"uploaded_count": uploaded_count, "total_bytes": total_bytes}
+
+
+def load_offload_storage_access(config, logger=None):
+    offload_cfg = config.get("offload", {})
+    if not offload_cfg.get("enabled"):
+        return None
+
+    storage_root_value = offload_cfg.get("storage_root") or ""
+    if not storage_root_value:
+        return {
+            "ok": False,
+            "path": "",
+            "error": "storage_root is not configured",
+        }
+
+    storage_root = Path(storage_root_value)
+    try:
+        if not storage_root.exists():
+            return {
+                "ok": False,
+                "path": str(storage_root),
+                "error": "path does not exist",
+            }
+        if not storage_root.is_dir():
+            return {
+                "ok": False,
+                "path": str(storage_root),
+                "error": "path is not a directory",
+            }
+        with os.scandir(storage_root) as entries:
+            next(entries, None)
+        return {
+            "ok": True,
+            "path": str(storage_root),
+            "error": None,
+        }
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("Failed to access offload storage %s: %s", storage_root, exc)
+        return {
+            "ok": False,
+            "path": str(storage_root),
+            "error": str(exc),
+        }
 
 
 def evaluate_socket_pressure(config, logger=None):
@@ -785,6 +831,21 @@ def build_progress_lines(state, global_results, active_processes, master_config,
             "storage_uploaded_media: "
             f"<code>{format_bytes(storage_usage['total_bytes'])} ({storage_usage['uploaded_count']} videos)</code>"
         )
+    storage_access = load_offload_storage_access(master_config, logger=logger)
+    if storage_access is not None:
+        if storage_access["ok"]:
+            lines.append(
+                "storage_access: "
+                f"<code>ok ({html.escape(storage_access['path'])})</code>"
+            )
+        else:
+            lines.append(
+                "storage_access: "
+                f"<code>unavailable ({html.escape(storage_access['path'])})</code>"
+            )
+            lines.append(
+                f"storage_error: <code>{html.escape(storage_access.get('error') or 'unknown')}</code>"
+            )
     socket_usage = load_socket_usage(logger=logger)
     if socket_usage is not None:
         lines.append(
@@ -874,6 +935,21 @@ def main():
         f"manifest: <code>{assignment['manifest_path']}</code>",
     ]
     queue_start_lines.extend(build_local_disk_lines(master_config))
+    storage_access = load_offload_storage_access(master_config, logger=logger)
+    if storage_access is not None:
+        if storage_access["ok"]:
+            queue_start_lines.append(
+                "storage_access: "
+                f"<code>ok ({html.escape(storage_access['path'])})</code>"
+            )
+        else:
+            queue_start_lines.append(
+                "storage_access: "
+                f"<code>unavailable ({html.escape(storage_access['path'])})</code>"
+            )
+            queue_start_lines.append(
+                f"storage_error: <code>{html.escape(storage_access.get('error') or 'unknown')}</code>"
+            )
     telegram.notify_custom("Assignment queue start", queue_start_lines)
 
     python_bin = sys.executable
@@ -1404,6 +1480,27 @@ def main():
         f"transcript_modal_urls: <code>{exported_lists['transcript_modal']}</code>",
     ]
     queue_finish_lines.extend(build_local_disk_lines(master_config))
+    storage_usage = load_offload_storage_usage(master_config, logger=logger)
+    if storage_usage is not None:
+        queue_finish_lines.append(
+            "storage_uploaded_media: "
+            f"<code>{format_bytes(storage_usage['total_bytes'])} ({storage_usage['uploaded_count']} videos)</code>"
+        )
+    storage_access = load_offload_storage_access(master_config, logger=logger)
+    if storage_access is not None:
+        if storage_access["ok"]:
+            queue_finish_lines.append(
+                "storage_access: "
+                f"<code>ok ({html.escape(storage_access['path'])})</code>"
+            )
+        else:
+            queue_finish_lines.append(
+                "storage_access: "
+                f"<code>unavailable ({html.escape(storage_access['path'])})</code>"
+            )
+            queue_finish_lines.append(
+                f"storage_error: <code>{html.escape(storage_access.get('error') or 'unknown')}</code>"
+            )
     telegram.notify_custom(
         "Assignment queue finish",
         queue_finish_lines,
