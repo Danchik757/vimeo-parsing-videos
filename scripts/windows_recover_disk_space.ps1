@@ -36,9 +36,11 @@ function Get-DirectorySizeGB([string]$Path) {
     if (-not (Test-Path $Path)) {
         return 0
     }
-    $sum = (Get-ChildItem $Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
-    if ($null -eq $sum) {
-        return 0
+    $sum = 0
+    foreach ($file in (Get-ChildItem $Path -Recurse -File -ErrorAction SilentlyContinue)) {
+        if ($null -ne $file.Length) {
+            $sum += [int64]$file.Length
+        }
     }
     return [math]::Round($sum / 1GB, 2)
 }
