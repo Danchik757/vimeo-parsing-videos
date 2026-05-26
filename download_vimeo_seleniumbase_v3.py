@@ -54,6 +54,7 @@ READING_TIME_MAX = 3
 CLOUDFLARE_TIMEOUT_MIN = 40
 CLOUDFLARE_TIMEOUT_MAX = 60
 CONTROLLED_RESTART_EXIT_CODE = 75
+LOW_DISK_EXIT_CODE = 86
 VIMEO_API_ROOT = "https://api.vimeo.com"
 VIMEO_API_ACCEPT_HEADER = "application/vnd.vimeo.*;version=3.4"
 VIMEO_API_USER_AGENT = "codex_vimeo_fix/1.0"
@@ -134,6 +135,8 @@ def load_config(config_path):
     settings.setdefault("api_http_pool_maxsize", 1)
     settings.setdefault("download_http_pool_connections", 2)
     settings.setdefault("download_http_pool_maxsize", 4)
+    settings.setdefault("min_free_disk_gb", 0)
+    settings.setdefault("disk_space_check_path", "")
 
     login_cfg = config.setdefault("vimeo_login", {})
     login_cfg.setdefault("email", "")
@@ -432,6 +435,63 @@ class StageTimeoutError(TimeoutError):
 
 class ControlledWorkerRestart(RuntimeError):
     """Raised when a worker should exit cleanly and resume in a fresh process."""
+
+
+class LowDiskSpaceError(RuntimeError):
+    """Raised when free disk space falls below the configured minimum."""
+
+    def __init__(self, message, snapshot=None):
+        super().__init__(message)
+        self.snapshot = snapshot or {}
+
+
+def get_disk_space_snapshot(path_value):
+    candidate = Path(path_value or ".")
+    if candidate.exists() and candidate.is_file():
+        candidate = candidate.parent
+    if not candidate.exists():
+        candidate = candidate.parent if candidate.parent != candidate else Path.cwd()
+    if not candidate.exists():
+        candidate = Path.cwd()
+
+    usage = shutil.disk_usage(candidate)
+    return {
+        "path": str(candidate),
+        "total_bytes": int(usage.total),
+        "used_bytes": int(usage.used),
+        "free_bytes": int(usage.free),
+        "total_gb": round(usage.total / (1024 ** 3), 2),
+        "used_gb": round(usage.used / (1024 ** 3), 2),
+        "free_gb": round(usage.free / (1024 ** 3), 2),
+    }
+
+
+def ensure_min_free_disk_space(config, stage="runtime", current_video_id=None):
+    threshold_gb = float(config["settings"].get("min_free_disk_gb", 0) or 0)
+    if threshold_gb <= 0:
+        return None
+
+    check_path = (
+        config["settings"].get("disk_space_check_path")
+        or config["files"].get("videos_dir")
+        or config["files"].get("logs_dir")
+        or "."
+    )
+    snapshot = get_disk_space_snapshot(check_path)
+    snapshot["threshold_gb"] = threshold_gb
+    snapshot["stage"] = stage
+    snapshot["video_id"] = current_video_id
+    if float(snapshot["free_gb"]) >= threshold_gb:
+        return snapshot
+
+    video_suffix = f", video_id={current_video_id}" if current_video_id else ""
+    raise LowDiskSpaceError(
+        (
+            f"Free disk space dropped below threshold during {stage}{video_suffix}: "
+            f"free={snapshot['free_gb']:.2f} GB threshold={threshold_gb:.2f} GB path={snapshot['path']}"
+        ),
+        snapshot=snapshot,
+    )
 
 
 def write_watchdog_restart_summary(config, snapshot, idle_for):
@@ -2835,6 +2895,8 @@ def main():
     )
 
     fatal_error = None
+    fatal_category = None
+    fatal_disk_snapshot = None
     exit_code = 0
     controlled_restart_requested = False
     controlled_restart_reason = None
@@ -2852,6 +2914,7 @@ def main():
     logger.info("SeleniumBase args: %s", sb_kwargs)
 
     try:
+        ensure_min_free_disk_space(config, stage="worker startup")
         if start_index >= len(urls):
             logger.info(
                 "Resume state indicates all %d URLs are already processed. Exiting without browser launch.",
@@ -2878,6 +2941,11 @@ def main():
 
                 for i, video_url in enumerate(urls[start_index:], start=start_index + 1):
                     video_id = extract_video_id(video_url)
+                    ensure_min_free_disk_space(
+                        config,
+                        stage="before processing next video",
+                        current_video_id=video_id,
+                    )
                     if config["resume"]["skip_completed_files"]:
                         existing_file = find_existing_completed_file(video_dir, video_id)
                         metadata_path = resolve_existing_metadata_path(video_dir, json_dir, video_id)
@@ -3392,6 +3460,12 @@ def main():
                                 )
                                 time.sleep(retry_delay)
 
+                        ensure_min_free_disk_space(
+                            config,
+                            stage="before persisting video result",
+                            current_video_id=video_id,
+                        )
+
                         if result and result["success"]:
                             successful_downloads += 1
                             metadata_path = save_video_metadata(
@@ -3707,6 +3781,23 @@ def main():
         controlled_restart_reason = str(exc)
         exit_code = CONTROLLED_RESTART_EXIT_CODE
         logger.warning("Worker requested controlled restart: %s", exc)
+    except LowDiskSpaceError as exc:
+        fatal_error = str(exc)
+        fatal_category = "low_disk_space"
+        fatal_disk_snapshot = getattr(exc, "snapshot", {}) or {}
+        exit_code = LOW_DISK_EXIT_CODE
+        logger.exception("Low disk space: %s", exc)
+        telegram.notify_custom(
+            "Недостаточно свободного места",
+            [
+                f"error: <code>{str(exc)[:350]}</code>",
+                f"free_gb: <code>{fatal_disk_snapshot.get('free_gb')}</code>",
+                f"threshold_gb: <code>{fatal_disk_snapshot.get('threshold_gb')}</code>",
+                f"check_path: <code>{fatal_disk_snapshot.get('path')}</code>",
+                f"config: <code>{config['_meta']['config_path']}</code>",
+                f"resume_next_index: <code>{resume_state.get('next_index')}</code>",
+            ],
+        )
     except Exception as exc:
         fatal_error = str(exc)
         if should_recycle_after_fatal_exception(
@@ -3796,6 +3887,7 @@ def main():
         "failed_urls": len(failed_urls),
         "exit_code": exit_code,
         "fatal_error": fatal_error,
+        "fatal_category": fatal_category,
         "restart_requested": controlled_restart_requested,
         "restart_reason": controlled_restart_reason,
         "log_file": config["files"]["log_file"],
@@ -3813,6 +3905,9 @@ def main():
         "resume_next_index": resume_state["next_index"],
         "resume_completed": resume_state["completed"],
         "resume_source_signature": resume_state.get("source_signature"),
+        "disk_check_path": fatal_disk_snapshot.get("path") if fatal_disk_snapshot else None,
+        "disk_free_gb": fatal_disk_snapshot.get("free_gb") if fatal_disk_snapshot else None,
+        "disk_threshold_gb": fatal_disk_snapshot.get("threshold_gb") if fatal_disk_snapshot else None,
     }
     write_summary(config, summary)
     telegram.notify_finish(summary, wait=True)

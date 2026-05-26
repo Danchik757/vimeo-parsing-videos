@@ -12,6 +12,7 @@ from pathlib import Path
 
 from download_vimeo_seleniumbase_v3 import (
     CONTROLLED_RESTART_EXIT_CODE,
+    LOW_DISK_EXIT_CODE,
     PROJECT_ROOT,
     load_config,
     setup_logger,
@@ -51,9 +52,13 @@ def load_batch_summary_excerpt(summary_path):
     return {
         "summary_exit_code": summary.get("exit_code"),
         "fatal_error": summary.get("fatal_error"),
+        "fatal_category": summary.get("fatal_category"),
         "restart_requested": summary.get("restart_requested"),
         "restart_reason": summary.get("restart_reason"),
         "resume_next_index": summary.get("resume_next_index"),
+        "disk_check_path": summary.get("disk_check_path"),
+        "disk_free_gb": summary.get("disk_free_gb"),
+        "disk_threshold_gb": summary.get("disk_threshold_gb"),
     }
 
 
@@ -1050,7 +1055,57 @@ def main():
             slot_summaries[slot_name]["active_batch_number"] = None
             batch_summary_excerpt = load_batch_summary_excerpt(batch_summary_path)
 
-            if return_code == CONTROLLED_RESTART_EXIT_CODE:
+            if return_code == LOW_DISK_EXIT_CODE or batch_summary_excerpt.get("fatal_category") == "low_disk_space":
+                state_item["status"] = "failed"
+                state_item["last_error"] = {
+                    "at": now_string(),
+                    "batch_number": batch_number,
+                    "exit_code": return_code,
+                    "summary_exists": bool(batch_summary_path.exists()),
+                    "results_exists": bool(batch_results_path.exists()),
+                    "reason": "low_disk_space",
+                }
+                slot_summaries[slot_name]["failed"] += 1
+                save_worker_slot_summary(slot_dir, slot_summaries[slot_name])
+                batch_summary, exported_lists = merge_batch_outputs_if_present(
+                    batch_summary_path,
+                    batch_results_path,
+                    global_results,
+                    batch_number,
+                    slot_name,
+                    results_path,
+                    workers_root,
+                    logger,
+                )
+                if batch_summary is not None:
+                    logger.warning(
+                        "Merged partial outputs for low-disk terminated batch %04d",
+                        batch_number,
+                    )
+                logger.error(
+                    "Batch %04d stopped due to low disk space (exit_code=%s, summary=%s, results=%s)",
+                    batch_number,
+                    return_code,
+                    batch_summary_path.exists(),
+                    batch_results_path.exists(),
+                )
+                exit_code = 1
+                stop_requested = True
+                if telegram.notify_on_error:
+                    telegram.notify_custom(
+                        "Assignment queue stopped: low disk space",
+                        [
+                            f"worker: <code>{slot_name}</code>",
+                            f"batch: <code>{batch_number:04d}</code>",
+                            f"shard: <code>{Path(item['source_json']).name}</code>",
+                            f"exit_code: <code>{return_code}</code>",
+                            f"free_gb: <code>{batch_summary_excerpt.get('disk_free_gb')}</code>",
+                            f"threshold_gb: <code>{batch_summary_excerpt.get('disk_threshold_gb')}</code>",
+                            f"check_path: <code>{batch_summary_excerpt.get('disk_check_path') or '-'}</code>",
+                            f"fatal_error: <code>{batch_summary_excerpt.get('fatal_error') or '-'}</code>",
+                        ],
+                    )
+            elif return_code == CONTROLLED_RESTART_EXIT_CODE:
                 restart_action = handle_controlled_restart(
                     state_item,
                     batch_number,

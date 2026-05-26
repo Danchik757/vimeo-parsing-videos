@@ -37,7 +37,8 @@
   },
   "settings": {
     "test_mode": false,
-    "test_limit": 0
+    "test_limit": 0,
+    "min_free_disk_gb": 10
   },
   "offload": {
     "enabled": true,
