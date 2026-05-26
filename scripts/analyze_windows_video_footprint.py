@@ -31,6 +31,11 @@ def parse_args():
         action="store_true",
         help="Delete local non-json files for dirs whose metadata says uploaded and remote copy exists",
     )
+    parser.add_argument(
+        "--delete-part-only",
+        action="store_true",
+        help="Delete .part files from part_only dirs (loses partial download resume progress)",
+    )
     return parser.parse_args()
 
 
@@ -135,6 +140,18 @@ def maybe_delete_safe_nonjson(entry):
     return removed
 
 
+def maybe_delete_part_only(entry):
+    if entry["category"] != "part_only":
+        return 0
+    removed = 0
+    for file_name in entry["non_json_files"]:
+        path = Path(file_name)
+        if path.exists() and path.is_file() and path.suffix.lower() == ".part":
+            removed += path.stat().st_size
+            path.unlink()
+    return removed
+
+
 def analyze_flat_bucket(path: Path):
     if not path.exists():
         return {"exists": False, "file_count": 0, "size_bytes": 0, "size_gb": 0.0}
@@ -180,6 +197,15 @@ def main():
             if child.is_dir():
                 downloaded_entries.append(classify_downloaded_dir(child))
 
+    deleted_part_only_bytes = 0
+    if args.delete_part_only:
+        for entry in downloaded_entries:
+            deleted_part_only_bytes += maybe_delete_part_only(entry)
+        downloaded_entries = []
+        for child in sorted(downloaded_root.iterdir()):
+            if child.is_dir():
+                downloaded_entries.append(classify_downloaded_dir(child))
+
     category_totals = {}
     safe_reclaim_bytes = 0
     for entry in downloaded_entries:
@@ -209,6 +235,8 @@ def main():
             "safe_reclaim_gb": format_gb(safe_reclaim_bytes),
             "deleted_safe_nonjson_bytes": deleted_bytes,
             "deleted_safe_nonjson_gb": format_gb(deleted_bytes),
+            "deleted_part_only_bytes": deleted_part_only_bytes,
+            "deleted_part_only_gb": format_gb(deleted_part_only_bytes),
             "top_downloaded_dirs": top_dirs,
         }
     )
@@ -222,6 +250,7 @@ def main():
     print(f"no_links_gb: {report['no_links']['size_gb']}")
     print(f"safe_reclaim_gb: {report['safe_reclaim_gb']}")
     print(f"deleted_safe_nonjson_gb: {report['deleted_safe_nonjson_gb']}")
+    print(f"deleted_part_only_gb: {report['deleted_part_only_gb']}")
     print("category_totals:")
     for key in sorted(category_totals):
         item = category_totals[key]
