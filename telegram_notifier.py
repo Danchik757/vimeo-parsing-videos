@@ -287,6 +287,9 @@ class TelegramNotifier:
         self.notify_on_ip_block = _bool_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_on_ip_block", True), True)
         self.notify_on_stall = _bool_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_on_stall", True), True)
         self.notify_on_heartbeat = _bool_or_default(_cfg_value(notifications_cfg, telegram_cfg, "notify_on_heartbeat", True), True)
+        self.footer_tag = str(
+            _cfg_value(notifications_cfg, telegram_cfg, "footer_tag", "")
+        ).strip()
         self.separator_before_worker_messages = _bool_or_default(
             _cfg_value(notifications_cfg, telegram_cfg, "separator_before_worker_messages", False),
             False,
@@ -572,11 +575,13 @@ class TelegramNotifier:
 
     def _compose_message(self, title, lines):
         body = "\n".join(lines)
+        footer = f"\n{html.escape(self.footer_tag)}" if self.footer_tag else ""
         return (
             f"<b>{html.escape(self.label)}</b>\n"
             f"{html.escape(title)}\n\n"
             f"{body}\n\n"
             f"time: <code>{_now()}</code>"
+            f"{footer}"
         )
 
 

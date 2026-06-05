@@ -136,7 +136,12 @@ def load_config(config_path):
     settings.setdefault("download_http_pool_connections", 2)
     settings.setdefault("download_http_pool_maxsize", 4)
     settings.setdefault("min_free_disk_gb", 0)
+    settings.setdefault("min_free_disk_action", "stop")
+    settings.setdefault("resume_free_disk_gb", float(settings.get("min_free_disk_gb", 0) or 0))
     settings.setdefault("disk_space_check_path", "")
+    settings.setdefault("disk_space_wait_poll_seconds", 60)
+    settings.setdefault("disk_space_wait_timeout_seconds", 0)
+    settings.setdefault("disk_space_pause_notification_every_seconds", 900)
 
     login_cfg = config.setdefault("vimeo_login", {})
     login_cfg.setdefault("email", "")
@@ -466,10 +471,41 @@ def get_disk_space_snapshot(path_value):
     }
 
 
-def ensure_min_free_disk_space(config, stage="runtime", current_video_id=None):
+def ensure_min_free_disk_space(
+    config,
+    stage="runtime",
+    current_video_id=None,
+    logger=None,
+    telegram=None,
+    runtime_state=None,
+):
     threshold_gb = float(config["settings"].get("min_free_disk_gb", 0) or 0)
     if threshold_gb <= 0:
         return None
+
+    action = str(config["settings"].get("min_free_disk_action", "stop") or "stop").strip().lower()
+    resume_threshold_gb = float(
+        config["settings"].get("resume_free_disk_gb", threshold_gb) or threshold_gb
+    )
+    resume_threshold_gb = max(threshold_gb, resume_threshold_gb)
+    wait_poll_seconds = max(
+        5,
+        int(config["settings"].get("disk_space_wait_poll_seconds", 60) or 60),
+    )
+    wait_timeout_seconds = max(
+        0,
+        int(config["settings"].get("disk_space_wait_timeout_seconds", 0) or 0),
+    )
+    pause_notify_every_seconds = max(
+        0,
+        int(
+            config["settings"].get(
+                "disk_space_pause_notification_every_seconds",
+                900,
+            )
+            or 900
+        ),
+    )
 
     check_path = (
         config["settings"].get("disk_space_check_path")
@@ -483,6 +519,93 @@ def ensure_min_free_disk_space(config, stage="runtime", current_video_id=None):
     snapshot["video_id"] = current_video_id
     if float(snapshot["free_gb"]) >= threshold_gb:
         return snapshot
+
+    if action == "wait":
+        wait_started_ts = time.time()
+        last_notify_ts = 0.0
+        last_log_ts = 0.0
+        recovery_notified = False
+        while True:
+            now = time.time()
+            waited_seconds = int(now - wait_started_ts)
+            if runtime_state is not None:
+                runtime_state.touch("waiting for disk space", current_video_id)
+            if (
+                telegram is not None
+                and (
+                    last_notify_ts == 0.0
+                    or pause_notify_every_seconds <= 0
+                    or now - last_notify_ts >= pause_notify_every_seconds
+                )
+            ):
+                telegram.notify_custom(
+                    "Ожидание освобождения места",
+                    [
+                        f"stage: <code>{stage}</code>",
+                        f"video_id: <code>{current_video_id or '-'}</code>",
+                        f"free_gb: <code>{snapshot['free_gb']}</code>",
+                        f"threshold_gb: <code>{threshold_gb}</code>",
+                        f"resume_gb: <code>{resume_threshold_gb}</code>",
+                        f"waited_seconds: <code>{waited_seconds}</code>",
+                        f"check_path: <code>{snapshot['path']}</code>",
+                        "action: <code>paused, waiting for offload/free space recovery</code>",
+                    ],
+                )
+                last_notify_ts = now
+            if logger is not None and (
+                last_log_ts == 0.0
+                or pause_notify_every_seconds <= 0
+                or now - last_log_ts >= pause_notify_every_seconds
+            ):
+                logger.warning(
+                    "Waiting for free disk space recovery during %s: free=%.2f GB threshold=%.2f GB resume=%.2f GB path=%s video=%s waited=%ss",
+                    stage,
+                    float(snapshot["free_gb"]),
+                    threshold_gb,
+                    resume_threshold_gb,
+                    snapshot["path"],
+                    current_video_id,
+                    waited_seconds,
+                )
+                last_log_ts = now
+
+            if wait_timeout_seconds > 0 and waited_seconds >= wait_timeout_seconds:
+                snapshot["waited_seconds"] = waited_seconds
+                break
+
+            time.sleep(wait_poll_seconds)
+            snapshot = get_disk_space_snapshot(check_path)
+            snapshot["threshold_gb"] = threshold_gb
+            snapshot["resume_threshold_gb"] = resume_threshold_gb
+            snapshot["stage"] = stage
+            snapshot["video_id"] = current_video_id
+            snapshot["waited_seconds"] = waited_seconds
+            if float(snapshot["free_gb"]) >= resume_threshold_gb:
+                if telegram is not None and not recovery_notified:
+                    telegram.notify_custom(
+                        "Место освобождено",
+                        [
+                            f"stage: <code>{stage}</code>",
+                            f"video_id: <code>{current_video_id or '-'}</code>",
+                            f"free_gb: <code>{snapshot['free_gb']}</code>",
+                            f"resume_gb: <code>{resume_threshold_gb}</code>",
+                            f"waited_seconds: <code>{waited_seconds}</code>",
+                            f"check_path: <code>{snapshot['path']}</code>",
+                            "action: <code>resuming batch processing</code>",
+                        ],
+                    )
+                    recovery_notified = True
+                if logger is not None:
+                    logger.info(
+                        "Free disk space recovered during %s: free=%.2f GB resume=%.2f GB path=%s video=%s waited=%ss",
+                        stage,
+                        float(snapshot["free_gb"]),
+                        resume_threshold_gb,
+                        snapshot["path"],
+                        current_video_id,
+                        waited_seconds,
+                    )
+                return snapshot
 
     video_suffix = f", video_id={current_video_id}" if current_video_id else ""
     raise LowDiskSpaceError(
@@ -2914,7 +3037,13 @@ def main():
     logger.info("SeleniumBase args: %s", sb_kwargs)
 
     try:
-        ensure_min_free_disk_space(config, stage="worker startup")
+        ensure_min_free_disk_space(
+            config,
+            stage="worker startup",
+            logger=logger,
+            telegram=telegram,
+            runtime_state=runtime_state,
+        )
         if start_index >= len(urls):
             logger.info(
                 "Resume state indicates all %d URLs are already processed. Exiting without browser launch.",
@@ -2945,6 +3074,9 @@ def main():
                         config,
                         stage="before processing next video",
                         current_video_id=video_id,
+                        logger=logger,
+                        telegram=telegram,
+                        runtime_state=runtime_state,
                     )
                     if config["resume"]["skip_completed_files"]:
                         existing_file = find_existing_completed_file(video_dir, video_id)
@@ -3464,6 +3596,9 @@ def main():
                             config,
                             stage="before persisting video result",
                             current_video_id=video_id,
+                            logger=logger,
+                            telegram=telegram,
+                            runtime_state=runtime_state,
                         )
 
                         if result and result["success"]:
