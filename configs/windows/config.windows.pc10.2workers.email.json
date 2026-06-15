@@ -27,7 +27,7 @@
     "notify_on_ip_block": true,
     "notify_on_stall": true,
     "notify_on_heartbeat": true,
-    "footer_tag": "#inno-pc10-windows"
+    "footer_tag": "#inno_pc10_windows"
   },
   "telegram": {
     "enabled": false
