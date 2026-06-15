@@ -58,6 +58,7 @@ LOW_DISK_EXIT_CODE = 86
 VIMEO_API_ROOT = "https://api.vimeo.com"
 VIMEO_API_ACCEPT_HEADER = "application/vnd.vimeo.*;version=3.4"
 VIMEO_API_USER_AGENT = "codex_vimeo_fix/1.0"
+_PARTIAL_CLEANUP_LAST_RUN_TS = {}
 
 
 def load_config(config_path):
@@ -142,6 +143,10 @@ def load_config(config_path):
     settings.setdefault("disk_space_wait_poll_seconds", 60)
     settings.setdefault("disk_space_wait_timeout_seconds", 0)
     settings.setdefault("disk_space_pause_notification_every_seconds", 900)
+    settings.setdefault("partial_cleanup_enabled", True)
+    settings.setdefault("part_cleanup_max_total_gb", 40)
+    settings.setdefault("part_cleanup_stale_after_seconds", 21600)
+    settings.setdefault("part_cleanup_check_interval_seconds", 300)
 
     login_cfg = config.setdefault("vimeo_login", {})
     login_cfg.setdefault("email", "")
@@ -471,6 +476,191 @@ def get_disk_space_snapshot(path_value):
     }
 
 
+def collect_partial_download_entries(videos_dir, current_video_id=None):
+    downloaded_root = Path(videos_dir) / "downloaded"
+    if not downloaded_root.exists():
+        return []
+
+    normalized_current_video_id = (
+        str(current_video_id).strip() if current_video_id is not None else None
+    )
+    now_ts = time.time()
+    entries = []
+    for part_path in sorted(downloaded_root.glob("*/*.part")):
+        try:
+            stat = part_path.stat()
+        except OSError:
+            continue
+
+        video_dir = part_path.parent
+        video_id = video_dir.name
+        entries.append(
+            {
+                "video_id": video_id,
+                "path": str(part_path),
+                "dir_path": str(video_dir),
+                "size_bytes": int(stat.st_size),
+                "mtime_ts": float(stat.st_mtime),
+                "age_seconds": max(0, int(now_ts - stat.st_mtime)),
+                "protected": bool(
+                    normalized_current_video_id
+                    and str(video_id).strip() == normalized_current_video_id
+                ),
+            }
+        )
+    return entries
+
+
+def _try_remove_empty_parent_dir(path_value):
+    try:
+        path = Path(path_value)
+        if path.exists() and path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    except OSError:
+        return
+
+
+def cleanup_partial_download_cache(
+    config,
+    logger=None,
+    telegram=None,
+    runtime_state=None,
+    current_video_id=None,
+    reason="runtime",
+    force=False,
+):
+    settings = config["settings"]
+    if not bool(settings.get("partial_cleanup_enabled", True)):
+        return None
+
+    videos_dir = config["files"].get("videos_dir")
+    if not videos_dir:
+        return None
+
+    check_interval_seconds = max(
+        0,
+        int(settings.get("part_cleanup_check_interval_seconds", 300) or 300),
+    )
+    cache_key = str(Path(videos_dir).resolve())
+    now_ts = time.time()
+    last_run_ts = float(_PARTIAL_CLEANUP_LAST_RUN_TS.get(cache_key, 0.0) or 0.0)
+    if not force and check_interval_seconds > 0 and now_ts - last_run_ts < check_interval_seconds:
+        return None
+    _PARTIAL_CLEANUP_LAST_RUN_TS[cache_key] = now_ts
+
+    stale_after_seconds = max(
+        0,
+        int(settings.get("part_cleanup_stale_after_seconds", 21600) or 21600),
+    )
+    max_total_gb = float(settings.get("part_cleanup_max_total_gb", 40) or 0)
+    max_total_bytes = int(max_total_gb * (1024 ** 3)) if max_total_gb > 0 else 0
+
+    entries = collect_partial_download_entries(videos_dir, current_video_id=current_video_id)
+    initial_total_bytes = sum(int(entry["size_bytes"]) for entry in entries)
+    remaining_total_bytes = initial_total_bytes
+    deleted_bytes = 0
+    deleted_entries = []
+
+    def delete_entry(entry, delete_reason):
+        nonlocal remaining_total_bytes, deleted_bytes
+        path = Path(entry["path"])
+        if not path.exists():
+            return False
+        size_bytes = int(entry["size_bytes"])
+        try:
+            path.unlink()
+        except OSError:
+            return False
+        remaining_total_bytes = max(0, remaining_total_bytes - size_bytes)
+        deleted_bytes += size_bytes
+        deleted_entries.append(
+            {
+                "video_id": entry["video_id"],
+                "path": entry["path"],
+                "size_bytes": size_bytes,
+                "reason": delete_reason,
+                "age_seconds": entry["age_seconds"],
+            }
+        )
+        _try_remove_empty_parent_dir(entry["dir_path"])
+        return True
+
+    if runtime_state is not None and entries:
+        runtime_state.touch("cleaning stale partial downloads", current_video_id)
+
+    for entry in sorted(entries, key=lambda item: item["mtime_ts"]):
+        if entry["protected"]:
+            continue
+        if stale_after_seconds > 0 and entry["age_seconds"] >= stale_after_seconds:
+            delete_entry(entry, "stale")
+
+    if max_total_bytes > 0 and remaining_total_bytes > max_total_bytes:
+        survivors = [
+            entry
+            for entry in sorted(entries, key=lambda item: item["mtime_ts"])
+            if Path(entry["path"]).exists() and not entry["protected"]
+        ]
+        for entry in survivors:
+            if remaining_total_bytes <= max_total_bytes:
+                break
+            delete_entry(entry, "over_limit")
+
+    remaining_entries = collect_partial_download_entries(videos_dir, current_video_id=current_video_id)
+    result = {
+        "reason": reason,
+        "initial_count": len(entries),
+        "initial_total_bytes": initial_total_bytes,
+        "initial_total_gb": round(initial_total_bytes / (1024 ** 3), 3),
+        "remaining_count": len(remaining_entries),
+        "remaining_total_bytes": sum(int(entry["size_bytes"]) for entry in remaining_entries),
+        "remaining_total_gb": round(
+            sum(int(entry["size_bytes"]) for entry in remaining_entries) / (1024 ** 3),
+            3,
+        ),
+        "deleted_count": len(deleted_entries),
+        "deleted_bytes": deleted_bytes,
+        "deleted_gb": round(deleted_bytes / (1024 ** 3), 3),
+        "deleted_stale_count": sum(1 for entry in deleted_entries if entry["reason"] == "stale"),
+        "deleted_over_limit_count": sum(1 for entry in deleted_entries if entry["reason"] == "over_limit"),
+        "max_total_gb": max_total_gb,
+        "stale_after_seconds": stale_after_seconds,
+        "protected_video_id": current_video_id,
+    }
+
+    if deleted_entries:
+        if logger is not None:
+            logger.warning(
+                "Partial download cleanup during %s: deleted=%d files %.2f GB (stale=%d over_limit=%d), remaining=%.2f GB",
+                reason,
+                result["deleted_count"],
+                result["deleted_gb"],
+                result["deleted_stale_count"],
+                result["deleted_over_limit_count"],
+                result["remaining_total_gb"],
+            )
+        if telegram is not None:
+            lines = [
+                f"reason: <code>{reason}</code>",
+                f"deleted_part_files: <code>{result['deleted_count']}</code>",
+                f"deleted_part_gb: <code>{result['deleted_gb']}</code>",
+                f"stale_deleted: <code>{result['deleted_stale_count']}</code>",
+                f"over_limit_deleted: <code>{result['deleted_over_limit_count']}</code>",
+                f"remaining_part_gb: <code>{result['remaining_total_gb']}</code>",
+                f"part_limit_gb: <code>{result['max_total_gb']}</code>",
+                f"protected_video_id: <code>{current_video_id or '-'}</code>",
+            ]
+            preview_entries = deleted_entries[:5]
+            if preview_entries:
+                preview_text = ", ".join(
+                    f"{entry['video_id']}({round(entry['size_bytes'] / (1024 ** 3), 2)} GB/{entry['reason']})"
+                    for entry in preview_entries
+                )
+                lines.append(f"deleted_preview: <code>{preview_text}</code>")
+            telegram.notify_custom("Очистка partial downloads", lines)
+
+    return result
+
+
 def ensure_min_free_disk_space(
     config,
     stage="runtime",
@@ -514,6 +704,16 @@ def ensure_min_free_disk_space(
         or "."
     )
     snapshot = get_disk_space_snapshot(check_path)
+    cleanup_result = cleanup_partial_download_cache(
+        config,
+        logger=logger,
+        telegram=telegram,
+        runtime_state=runtime_state,
+        current_video_id=current_video_id,
+        reason=stage,
+    )
+    if cleanup_result and cleanup_result.get("deleted_bytes", 0) > 0:
+        snapshot = get_disk_space_snapshot(check_path)
     snapshot["threshold_gb"] = threshold_gb
     snapshot["stage"] = stage
     snapshot["video_id"] = current_video_id
@@ -530,6 +730,21 @@ def ensure_min_free_disk_space(
             waited_seconds = int(now - wait_started_ts)
             if runtime_state is not None:
                 runtime_state.touch("waiting for disk space", current_video_id)
+            cleanup_result = cleanup_partial_download_cache(
+                config,
+                logger=logger,
+                telegram=telegram,
+                runtime_state=runtime_state,
+                current_video_id=current_video_id,
+                reason=f"{stage} wait",
+            )
+            if cleanup_result and cleanup_result.get("deleted_bytes", 0) > 0:
+                snapshot = get_disk_space_snapshot(check_path)
+                snapshot["threshold_gb"] = threshold_gb
+                snapshot["resume_threshold_gb"] = resume_threshold_gb
+                snapshot["stage"] = stage
+                snapshot["video_id"] = current_video_id
+                snapshot["waited_seconds"] = waited_seconds
             if (
                 telegram is not None
                 and (

@@ -44,7 +44,11 @@
     "resume_free_disk_gb": 35,
     "disk_space_wait_poll_seconds": 60,
     "disk_space_wait_timeout_seconds": 0,
-    "disk_space_pause_notification_every_seconds": 900
+    "disk_space_pause_notification_every_seconds": 900,
+    "partial_cleanup_enabled": true,
+    "part_cleanup_max_total_gb": 40,
+    "part_cleanup_stale_after_seconds": 14400,
+    "part_cleanup_check_interval_seconds": 120
   },
   "offload": {
     "enabled": true,
