@@ -111,7 +111,10 @@
     "socket_pressure_poll_seconds": 5,
     "socket_pressure_wait_timeout_action": "restart",
     "restart_after_processed": 100,
-    "consecutive_timeout_failures_before_restart": 2
+    "consecutive_timeout_failures_before_restart": 2,
+    "consecutive_cloudflare_failures_before_restart": 1,
+    "cloudflare_cooldown_seconds": 600,
+    "cloudflare_cooldown_poll_seconds": 30
   },
   "batches": {
     "stop_on_batch_error": false,

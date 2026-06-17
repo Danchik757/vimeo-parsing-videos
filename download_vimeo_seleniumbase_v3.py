@@ -211,6 +211,9 @@ def load_config(config_path):
     workers.setdefault("socket_pressure_wait_timeout_action", "restart")
     workers.setdefault("restart_after_processed", 100)
     workers.setdefault("consecutive_timeout_failures_before_restart", 3)
+    workers.setdefault("consecutive_cloudflare_failures_before_restart", 0)
+    workers.setdefault("cloudflare_cooldown_seconds", 0)
+    workers.setdefault("cloudflare_cooldown_poll_seconds", 30)
 
     batches = config.setdefault("batches", {})
     batches.setdefault("enabled", False)
@@ -980,6 +983,9 @@ def maybe_raise_controlled_restart(
     consecutive_timeout_failures,
     logger,
     video_id,
+    consecutive_cloudflare_failures=0,
+    runtime_state=None,
+    telegram=None,
 ):
     if current_index >= total_urls:
         return
@@ -995,6 +1001,51 @@ def maybe_raise_controlled_restart(
             )
             logger.warning("Controlled worker restart requested: %s", reason)
             raise ControlledWorkerRestart(reason)
+
+    cloudflare_restart_threshold = int(
+        worker_cfg.get("consecutive_cloudflare_failures_before_restart", 0) or 0
+    )
+    if (
+        cloudflare_restart_threshold > 0
+        and consecutive_cloudflare_failures >= cloudflare_restart_threshold
+    ):
+        cooldown_seconds = max(
+            0,
+            int(worker_cfg.get("cloudflare_cooldown_seconds", 0) or 0),
+        )
+        cooldown_poll_seconds = max(
+            5,
+            int(worker_cfg.get("cloudflare_cooldown_poll_seconds", 30) or 30),
+        )
+        if cooldown_seconds > 0:
+            logger.warning(
+                "Cloudflare challenge threshold reached at video %s; cooling down for %ss before worker restart",
+                video_id,
+                cooldown_seconds,
+            )
+            if telegram is not None:
+                telegram.notify_custom(
+                    "Cloudflare cooldown before recycle",
+                    [
+                        f"video_id: <code>{video_id}</code>",
+                        f"consecutive_cloudflare_failures: <code>{consecutive_cloudflare_failures}</code>",
+                        f"cooldown_seconds: <code>{cooldown_seconds}</code>",
+                        "action: <code>cooldown, then controlled worker restart</code>",
+                    ],
+                )
+            wait_with_runtime_updates(
+                cooldown_seconds,
+                poll_seconds=cooldown_poll_seconds,
+                runtime_state=runtime_state,
+                stage="cooling down after cloudflare block",
+                video_id=video_id,
+            )
+        reason = (
+            f"{consecutive_cloudflare_failures} consecutive Cloudflare challenge failures; "
+            f"restarting worker before retrying at video {video_id}"
+        )
+        logger.warning("Controlled worker restart requested: %s", reason)
+        raise ControlledWorkerRestart(reason)
 
     timeout_restart_threshold = int(
         worker_cfg.get("consecutive_timeout_failures_before_restart", 0) or 0
@@ -1286,6 +1337,41 @@ def is_probable_ip_block(error_message):
         "rate limit exceeded",
     ]
     return any(indicator in message for indicator in indicators)
+
+
+def is_cloudflare_turnstile_error_message(message):
+    text = str(message or "").lower()
+    if not text:
+        return False
+    indicators = [
+        "cloudflare turnstile not bypassed",
+        "verify you are human",
+        "verify to continue",
+        "cf-challenge",
+    ]
+    return any(indicator in text for indicator in indicators)
+
+
+def wait_with_runtime_updates(
+    total_seconds,
+    poll_seconds=30,
+    runtime_state=None,
+    stage="waiting",
+    video_id=None,
+):
+    total_seconds = max(0.0, float(total_seconds or 0))
+    if total_seconds <= 0:
+        return
+
+    poll_seconds = max(5.0, float(poll_seconds or 30))
+    deadline = time.time() + total_seconds
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        if runtime_state is not None:
+            runtime_state.touch(stage, video_id)
+        time.sleep(min(poll_seconds, remaining))
 
 
 def close_response_quietly(response):
@@ -3247,6 +3333,7 @@ def main():
     api_disabled_banner_logged = False
     download_session = build_download_http_session(config)
     consecutive_timeout_failures = 0
+    consecutive_cloudflare_failures = 0
 
     sb_kwargs = build_sb_kwargs(config, logger)
     logger.info("SeleniumBase args: %s", sb_kwargs)
@@ -3385,6 +3472,7 @@ def main():
                                 current_stage="already downloaded",
                             )
                             consecutive_timeout_failures = 0
+                            consecutive_cloudflare_failures = 0
                             maybe_raise_controlled_restart(
                                 config,
                                 start_index,
@@ -3393,6 +3481,9 @@ def main():
                                 consecutive_timeout_failures,
                                 logger,
                                 video_id,
+                                consecutive_cloudflare_failures=consecutive_cloudflare_failures,
+                                runtime_state=runtime_state,
+                                telegram=telegram,
                             )
                             if i < len(urls):
                                 delay = random.uniform(
@@ -3574,6 +3665,7 @@ def main():
                                 current_stage="skipped",
                             )
                             consecutive_timeout_failures = 0
+                            consecutive_cloudflare_failures = 0
                             maybe_raise_controlled_restart(
                                 config,
                                 start_index,
@@ -3582,6 +3674,9 @@ def main():
                                 consecutive_timeout_failures,
                                 logger,
                                 video_id,
+                                consecutive_cloudflare_failures=consecutive_cloudflare_failures,
+                                runtime_state=runtime_state,
+                                telegram=telegram,
                             )
                             if i < len(urls):
                                 delay = random.uniform(
@@ -3643,6 +3738,7 @@ def main():
                                 current_stage="404 skip",
                             )
                             consecutive_timeout_failures = 0
+                            consecutive_cloudflare_failures = 0
                             maybe_raise_controlled_restart(
                                 config,
                                 start_index,
@@ -3651,6 +3747,9 @@ def main():
                                 consecutive_timeout_failures,
                                 logger,
                                 video_id,
+                                consecutive_cloudflare_failures=consecutive_cloudflare_failures,
+                                runtime_state=runtime_state,
+                                telegram=telegram,
                             )
                             if i < len(urls):
                                 delay = random.uniform(
@@ -3720,6 +3819,7 @@ def main():
                                 current_stage="privacy skip",
                             )
                             consecutive_timeout_failures = 0
+                            consecutive_cloudflare_failures = 0
                             maybe_raise_controlled_restart(
                                 config,
                                 start_index,
@@ -3728,6 +3828,9 @@ def main():
                                 consecutive_timeout_failures,
                                 logger,
                                 video_id,
+                                consecutive_cloudflare_failures=consecutive_cloudflare_failures,
+                                runtime_state=runtime_state,
+                                telegram=telegram,
                             )
                             if i < len(urls):
                                 delay = random.uniform(
@@ -3878,6 +3981,7 @@ def main():
                                 successful_downloads,
                             )
                             consecutive_timeout_failures = 0
+                            consecutive_cloudflare_failures = 0
                         elif result and result.get("skipped_by_policy"):
                             skipped_videos += 1
                             reason = (
@@ -3942,6 +4046,7 @@ def main():
                                 current_stage="non-original skip",
                             )
                             consecutive_timeout_failures = 0
+                            consecutive_cloudflare_failures = 0
                         else:
                             failed_videos += 1
                             error_message = result["error"] if result else "Unknown error"
@@ -4019,6 +4124,12 @@ def main():
                                 consecutive_timeout_failures += 1
                             else:
                                 consecutive_timeout_failures = 0
+                            if result and result.get("cloudflare_detected"):
+                                consecutive_cloudflare_failures += 1
+                            elif is_cloudflare_turnstile_error_message(error_message):
+                                consecutive_cloudflare_failures += 1
+                            else:
+                                consecutive_cloudflare_failures = 0
 
                         telegram.notify_progress(
                             i,
@@ -4037,6 +4148,9 @@ def main():
                             consecutive_timeout_failures,
                             logger,
                             video_id,
+                            consecutive_cloudflare_failures=consecutive_cloudflare_failures,
+                            runtime_state=runtime_state,
+                            telegram=telegram,
                         )
 
                         if i < len(urls):
@@ -4114,6 +4228,7 @@ def main():
                             consecutive_timeout_failures += 1
                         else:
                             consecutive_timeout_failures = 0
+                        consecutive_cloudflare_failures = 0
                         maybe_raise_controlled_restart(
                             config,
                             start_index,
@@ -4122,6 +4237,9 @@ def main():
                             consecutive_timeout_failures,
                             logger,
                             video_id,
+                            consecutive_cloudflare_failures=consecutive_cloudflare_failures,
+                            runtime_state=runtime_state,
+                            telegram=telegram,
                         )
                     finally:
                         close_response_quietly(response)
