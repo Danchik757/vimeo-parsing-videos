@@ -1,0 +1,6 @@
+{
+  "base_config": "config.windows.pc10.1worker.cf-test.json",
+  "browser": {
+    "user_data_dir": "C:/vimeo_profiles/worker_01"
+  }
+}

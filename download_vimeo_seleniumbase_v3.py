@@ -1091,9 +1091,6 @@ def check_if_cloudflare_blocked(sb, logger):
         page_source = sb.get_page_source().lower()
         page_title = sb.get_title().lower()
 
-        if " on vimeo" in page_title:
-            return False
-
         cloudflare_indicators = [
             "cloudflare turnstile",
             "verify you are human",
@@ -1106,6 +1103,11 @@ def check_if_cloudflare_blocked(sb, logger):
         for indicator in cloudflare_indicators:
             if indicator in page_source:
                 return True
+
+        # Fast-skip: a loaded Vimeo video page is not a challenge page.
+        # Checked AFTER indicators so an "on vimeo" title never hides a real challenge.
+        if " on vimeo" in page_title:
+            return False
 
         return False
     except Exception as exc:
@@ -1176,6 +1178,27 @@ def login_to_vimeo(sb, email, password, logger, config):
         logger.info("Opening Vimeo login page (attempt %d/%d)", attempt, login_retry_attempts)
         sb.open("https://vimeo.com/log_in")
         sb.sleep(3)
+
+        if check_if_cloudflare_blocked(sb, logger):
+            logger.warning(
+                "Cloudflare challenge detected on login page (attempt %d/%d); "
+                "waiting 30s for auto-bypass before filling form",
+                attempt,
+                login_retry_attempts,
+            )
+            sb.sleep(30)
+            if check_if_cloudflare_blocked(sb, logger):
+                if attempt < login_retry_attempts:
+                    logger.warning(
+                        "Cloudflare on login page persists; retrying in %ds",
+                        login_retry_delay_seconds,
+                    )
+                    sb.sleep(login_retry_delay_seconds)
+                    continue
+                raise RuntimeError(
+                    "Cloudflare challenge on Vimeo login page was not bypassed after retries"
+                )
+            logger.info("Cloudflare on login page appears to have cleared; proceeding with form")
 
         for selector in email_selectors:
             try:
@@ -2378,6 +2401,7 @@ def download_video(
     login_password=None,
     cloudflare_retry_count=0,
     video_deadline_ts=None,
+    telegram=None,
 ):
     result = {
         "success": False,
@@ -2566,23 +2590,82 @@ def download_video(
                     f"cloudflare auto-bypass stage for {video_id}",
                     _wait_and_recheck_cloudflare,
                 ):
-                    result["error"] = (
-                        f"Cloudflare Turnstile not bypassed after "
-                        f"{cloudflare_timeout:.0f}s"
+                    manual_wait = int(
+                        config["settings"].get("cloudflare_manual_bypass_wait_seconds", 0) or 0
                     )
-                    logger.error(result["error"])
-                    try:
-                        page_source = sb.get_page_source()
-                        debug_video_id = normalize_video_storage_key(video_id)
-                        debug_file = Path(config["files"]["logs_dir"]) / (
-                            f"cloudflare_fail_{debug_video_id}.html"
+                    if manual_wait > 0:
+                        logger.warning(
+                            "⚠️  CLOUDFLARE TURNSTILE — auto-bypass failed for %s. "
+                            "Manual solve window: %ds. "
+                            "Solve the checkbox in the open browser window, then wait.",
+                            video_url,
+                            manual_wait,
                         )
-                        with open(debug_file, "w", encoding="utf-8") as f:
-                            f.write(page_source)
-                        logger.info("Saved failed HTML to %s", debug_file)
-                    except Exception:
-                        pass
-                    return result
+                        if telegram is not None:
+                            try:
+                                telegram.notify_custom(
+                                    "Cloudflare manual solve needed",
+                                    [
+                                        f"video_url: <code>{video_url}</code>",
+                                        f"video_id: <code>{video_id}</code>",
+                                        f"manual_wait_seconds: <code>{manual_wait}</code>",
+                                        "action: solve Turnstile checkbox in open browser window",
+                                    ],
+                                )
+                            except Exception:
+                                pass
+                        wait_with_runtime_updates(
+                            manual_wait,
+                            poll_seconds=15,
+                            runtime_state=runtime_state,
+                            stage="waiting for manual cloudflare solve",
+                            video_id=video_id,
+                        )
+                        if not check_if_cloudflare_blocked(sb, logger):
+                            logger.info(
+                                "Cloudflare challenge cleared after manual wait for %s",
+                                video_id,
+                            )
+                            result["cloudflare_manual_solved"] = True
+                        else:
+                            logger.error(
+                                "Cloudflare challenge NOT cleared after manual wait for %s",
+                                video_id,
+                            )
+                            result["error"] = (
+                                f"Cloudflare Turnstile not bypassed after "
+                                f"{cloudflare_timeout:.0f}s auto + {manual_wait}s manual wait"
+                            )
+                            try:
+                                page_source = sb.get_page_source()
+                                debug_video_id = normalize_video_storage_key(video_id)
+                                debug_file = Path(config["files"]["logs_dir"]) / (
+                                    f"cloudflare_fail_{debug_video_id}.html"
+                                )
+                                with open(debug_file, "w", encoding="utf-8") as f:
+                                    f.write(page_source)
+                                logger.info("Saved failed HTML to %s", debug_file)
+                            except Exception:
+                                pass
+                            return result
+                    else:
+                        result["error"] = (
+                            f"Cloudflare Turnstile not bypassed after "
+                            f"{cloudflare_timeout:.0f}s"
+                        )
+                        logger.error(result["error"])
+                        try:
+                            page_source = sb.get_page_source()
+                            debug_video_id = normalize_video_storage_key(video_id)
+                            debug_file = Path(config["files"]["logs_dir"]) / (
+                                f"cloudflare_fail_{debug_video_id}.html"
+                            )
+                            with open(debug_file, "w", encoding="utf-8") as f:
+                                f.write(page_source)
+                            logger.info("Saved failed HTML to %s", debug_file)
+                        except Exception:
+                            pass
+                        return result
 
                 logger.info("Cloudflare bypassed successfully")
 
@@ -2862,7 +2945,11 @@ def build_sb_kwargs(config, logger):
         binary_location or "<default>",
     )
 
-    return {
+    user_data_dir = str(browser.get("user_data_dir", "") or "").strip() or None
+    if user_data_dir:
+        logger.info("Using persistent Chrome profile: %s", user_data_dir)
+
+    kwargs = {
         "browser": browser_name,
         "uc": bool(browser.get("uc", True)),
         "headless": bool(browser.get("headless", False)),
@@ -2876,6 +2963,9 @@ def build_sb_kwargs(config, logger):
             "--disable-blink-features=AutomationControlled",
         ),
     }
+    if user_data_dir:
+        kwargs["user_data_dir"] = user_data_dir
+    return kwargs
 
 
 def write_summary(config, summary):
@@ -3876,6 +3966,7 @@ def main():
                                 login_password=login_password,
                                 cloudflare_retry_count=attempt - 1,
                                 video_deadline_ts=video_deadline_ts,
+                                telegram=telegram,
                             )
                             if result["success"]:
                                 break
@@ -4124,7 +4215,11 @@ def main():
                                 consecutive_timeout_failures += 1
                             else:
                                 consecutive_timeout_failures = 0
-                            if result and result.get("cloudflare_detected"):
+                            if (
+                                result
+                                and result.get("cloudflare_detected")
+                                and not result.get("cloudflare_manual_solved")
+                            ):
                                 consecutive_cloudflare_failures += 1
                             elif is_cloudflare_turnstile_error_message(error_message):
                                 consecutive_cloudflare_failures += 1

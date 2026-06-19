@@ -52,7 +52,8 @@
     "curl_stall_timeout_seconds": 60,
     "login_completion_timeout_seconds": 30,
     "login_retry_attempts": 3,
-    "login_retry_delay_seconds": 20
+    "login_retry_delay_seconds": 20,
+    "cloudflare_manual_bypass_wait_seconds": 0
   },
   "browser": {
     "uc": true,

@@ -1,0 +1,18 @@
+{
+  "base_config": "config.windows.pc10.1worker.200.json",
+  "runtime": {
+    "job_name": "pc10-1worker-cf-test"
+  },
+  "settings": {
+    "cloudflare_manual_bypass_wait_seconds": 300
+  },
+  "workers": {
+    "count": 1,
+    "consecutive_cloudflare_failures_before_restart": 3,
+    "cloudflare_cooldown_seconds": 120,
+    "restart_after_processed": 0
+  },
+  "watchdog": {
+    "stall_exit_after_seconds": 1800
+  }
+}
