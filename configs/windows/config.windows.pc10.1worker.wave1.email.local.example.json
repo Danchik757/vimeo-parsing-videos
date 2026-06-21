@@ -1,0 +1,14 @@
+{
+  "base_config": "config.windows.pc10.1worker.wave1.email.json",
+  "browser": {
+    "user_data_dir": "C:/vimeo_profiles/pc10_account_a"
+  },
+  "email": {
+    "smtp_host": "mail.example.com",
+    "smtp_port": 587,
+    "smtp_ssl": false,
+    "smtp_user": "sender@example.com",
+    "smtp_pass": "CHANGE_ME",
+    "mail_addr": "sender@example.com"
+  }
+}
