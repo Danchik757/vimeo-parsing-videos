@@ -1,0 +1,23 @@
+{
+  "base_config": "config.windows.pc08.1worker.wave1.email.json",
+  "browser": {
+    "user_data_dir": "C:/vimeo_profiles/pc08_account_b"
+  },
+  "vimeo_api": {
+    "token": "REPLACE_ME",
+    "secret": "REPLACE_ME",
+    "client_id": "REPLACE_ME"
+  },
+  "vimeo_login": {
+    "email": "REPLACE_ME",
+    "password": "REPLACE_ME"
+  },
+  "email": {
+    "smtp_host": "mail.example.com",
+    "smtp_port": 587,
+    "smtp_ssl": false,
+    "smtp_user": "sender@example.com",
+    "smtp_pass": "CHANGE_ME",
+    "mail_addr": "sender@example.com"
+  }
+}

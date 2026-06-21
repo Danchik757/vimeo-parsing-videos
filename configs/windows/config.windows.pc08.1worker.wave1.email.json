@@ -1,0 +1,85 @@
+{
+  "base_config": "config.windows.4workers.json",
+  "files": {
+    "source_json": "../../data_shards/recovery_remaining_after_windows_smoke_20260525_500/need_parse_unique.remaining_after_linux_progress_20260511.after_windows_smoke50_20260525.json",
+    "videos_dir": "../../output/runs/pc08/windows-1worker-wave1-email/videos",
+    "jsons_dir": "../../output/runs/pc08/windows-1worker-wave1-email/jsons",
+    "logs_dir": "../../output/runs/pc08/windows-1worker-wave1-email",
+    "failed_downloads": "../../output/runs/pc08/windows-1worker-wave1-email/failed_downloads.json",
+    "log_file": "../../output/runs/pc08/windows-1worker-wave1-email/download.log",
+    "summary_file": "../../output/runs/pc08/windows-1worker-wave1-email/summary.json",
+    "results_file": "../../output/runs/pc08/windows-1worker-wave1-email/results_manifest.json"
+  },
+  "runtime": {
+    "job_name": "pc08-windows-1worker-wave1-email",
+    "worker_count": 1
+  },
+  "notifications": {
+    "transport": "email",
+    "notify_download_every_n_successes": 0,
+    "notify_skip_every_n_processed": 0,
+    "notify_progress_every_n_processed": 0,
+    "notify_progress_min_interval_seconds": 3600,
+    "notify_coordinator_progress_every_seconds": 3600,
+    "notify_on_start": true,
+    "notify_on_finish": true,
+    "notify_on_error": true,
+    "notify_on_ip_block": true,
+    "notify_on_stall": true,
+    "notify_on_heartbeat": true,
+    "footer_tag": "#inno_pc08_windows"
+  },
+  "telegram": {
+    "enabled": false
+  },
+  "email": {
+    "enabled": true,
+    "subject_prefix": "[pc08 wave1]"
+  },
+  "settings": {
+    "test_mode": false,
+    "test_limit": 0,
+    "cloudflare_manual_bypass_wait_seconds": 300,
+    "min_free_disk_gb": 20,
+    "min_free_disk_action": "wait",
+    "resume_free_disk_gb": 35,
+    "disk_space_wait_poll_seconds": 60,
+    "disk_space_wait_timeout_seconds": 0,
+    "disk_space_pause_notification_every_seconds": 900,
+    "partial_cleanup_enabled": true,
+    "part_cleanup_max_total_gb": 40,
+    "part_cleanup_stale_after_seconds": 14400,
+    "part_cleanup_check_interval_seconds": 120
+  },
+  "offload": {
+    "enabled": true,
+    "storage_root": "\\\\sciencestorage\\cc\\vimeo_Datasets",
+    "registry_file": "../../output/runs/pc08/windows-1worker-wave1-email/offload_registry.json",
+    "log_file": "../../output/runs/pc08/windows-1worker-wave1-email/offload.log",
+    "scan_interval_seconds": 60,
+    "min_file_age_seconds": 15,
+    "delete_local_video_after_upload": true,
+    "validate_with_ffprobe": false,
+    "ffprobe_bin": "ffprobe"
+  },
+  "workers": {
+    "count": 1,
+    "stagger_start_seconds": 0,
+    "restart_after_processed": 0,
+    "consecutive_timeout_failures_before_restart": 2,
+    "consecutive_cloudflare_failures_before_restart": 3,
+    "cloudflare_cooldown_seconds": 120,
+    "cloudflare_cooldown_poll_seconds": 30
+  },
+  "watchdog": {
+    "stall_alert_after_seconds": 600,
+    "repeat_alert_every_seconds": 600,
+    "heartbeat_every_seconds": 3600,
+    "exit_on_stall": true,
+    "stall_exit_after_seconds": 1800
+  },
+  "batches": {
+    "max_batch_retries": 4,
+    "max_controlled_restarts": 6
+  }
+}
