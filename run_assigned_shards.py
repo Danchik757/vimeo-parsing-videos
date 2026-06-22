@@ -20,8 +20,11 @@ from download_vimeo_seleniumbase_v3 import (
     setup_logger,
 )
 from platform_runtime import (
+    clear_windows_browser_profile_locks,
     cleanup_process_tree_after_exit,
+    is_windows,
     load_socket_usage,
+    terminate_windows_browser_processes_for_profile,
     terminate_process_tree,
     worker_popen_kwargs,
 )
@@ -39,6 +42,33 @@ def now_string():
 def read_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def prepare_browser_profile_for_worker_start(batch_config, logger):
+    if not is_windows():
+        return
+
+    browser = batch_config.get("browser", {}) or {}
+    user_data_dir = str(browser.get("user_data_dir", "") or "").strip()
+    if not user_data_dir:
+        return
+
+    terminated = terminate_windows_browser_processes_for_profile(
+        user_data_dir,
+        logger=logger,
+    )
+    removed = clear_windows_browser_profile_locks(
+        user_data_dir,
+        logger=logger,
+    )
+    if terminated or removed:
+        logger.warning(
+            "Prepared persistent browser profile for worker start: profile=%s terminated=%d removed_locks=%d",
+            user_data_dir,
+            terminated,
+            len(removed),
+        )
+        time.sleep(2)
 
 
 def load_batch_summary_excerpt(summary_path):
@@ -1058,6 +1088,7 @@ def main():
                 )
                 batch_config_path = batch_dir / "config.json"
                 write_json(batch_config_path, batch_config)
+                prepare_browser_profile_for_worker_start(batch_config, logger)
 
                 logger.info(
                     "Starting %s on batch %04d (%s)",

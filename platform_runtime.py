@@ -206,6 +206,97 @@ def _taskkill_process_tree(pid, force, logger=None, label="process", timeout_sec
         return False
 
 
+def terminate_windows_browser_processes_for_profile(profile_dir, logger=None, timeout_seconds=8):
+    if not is_windows() or not profile_dir:
+        return 0
+
+    raw_profile = str(profile_dir).strip()
+    if not raw_profile:
+        return 0
+
+    profile_forward = raw_profile.replace("\\", "/")
+    profile_back = raw_profile.replace("/", "\\")
+    ps_script = rf"""
+$profileA = '{profile_forward.replace("'", "''")}'
+$profileB = '{profile_back.replace("'", "''")}'
+$targets = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {{
+    ($_.Name -in @('chrome.exe', 'msedge.exe', 'chromedriver.exe', 'uc_driver.exe')) -and (
+        $_.Name -in @('chromedriver.exe', 'uc_driver.exe') -or
+        ($_.CommandLine -like "*$profileA*") -or
+        ($_.CommandLine -like "*$profileB*")
+    )
+}}
+$killed = @()
+foreach ($proc in $targets) {{
+    try {{
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+        $killed += $proc.ProcessId
+    }} catch {{}}
+}}
+Write-Output $killed.Count
+"""
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=max(2, float(timeout_seconds or 2)),
+        )
+        killed_count = 0
+        stdout_text = (completed.stdout or "").strip()
+        if stdout_text:
+            try:
+                killed_count = int(stdout_text.splitlines()[-1].strip())
+            except Exception:
+                killed_count = 0
+        if killed_count and logger is not None:
+            logger.warning(
+                "Stopped %d stale browser/driver process(es) for profile %s",
+                killed_count,
+                raw_profile,
+            )
+        return killed_count
+    except Exception as exc:
+        if logger is not None:
+            logger.debug(
+                "Failed to terminate stale browser processes for profile %s: %s",
+                raw_profile,
+                exc,
+            )
+        return 0
+
+
+def clear_windows_browser_profile_locks(profile_dir, logger=None):
+    if not is_windows() or not profile_dir:
+        return []
+
+    root = Path(profile_dir)
+    removed = []
+    for name in (
+        "SingletonLock",
+        "SingletonCookie",
+        "SingletonSocket",
+        "DevToolsActivePort",
+        "lockfile",
+    ):
+        candidate = root / name
+        try:
+            if candidate.exists():
+                candidate.unlink()
+                removed.append(str(candidate))
+        except Exception as exc:
+            if logger is not None:
+                logger.debug("Could not remove profile artifact %s: %s", candidate, exc)
+    if removed and logger is not None:
+        logger.warning(
+            "Removed %d stale browser profile artifact(s) from %s",
+            len(removed),
+            root,
+        )
+    return removed
+
+
 def _windows_process_children_map():
     if not is_windows():
         return {}
