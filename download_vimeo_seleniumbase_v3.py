@@ -1128,10 +1128,12 @@ def require_login_credentials(config):
 
 
 def is_login_page(current_url, title, page_context=None):
+    viewer_bootstrap = (page_context or {}).get("viewer_bootstrap") or {}
+    if viewer_bootstrap.get("logged_in") is True:
+        return False
     haystack = f"{current_url} {title}".lower()
     if "log_in" in haystack or "login" in haystack:
         return True
-    viewer_bootstrap = (page_context or {}).get("viewer_bootstrap") or {}
     if viewer_bootstrap.get("logged_in") is False:
         return True
     return False
@@ -1146,6 +1148,25 @@ def save_login_failure_artifact(sb, logger, config, attempt):
         logger.warning("Saved login failure HTML to %s", html_path)
     except Exception as exc:
         logger.warning("Failed to save login failure HTML: %s", exc)
+
+
+def get_page_identity(sb):
+    current_url = ""
+    page_title = ""
+    page_context = None
+    try:
+        current_url = sb.get_current_url()
+    except Exception:
+        pass
+    try:
+        page_title = sb.get_title()
+    except Exception:
+        pass
+    try:
+        page_context = extract_page_context_summary(sb.get_page_source())
+    except Exception:
+        page_context = None
+    return current_url, page_title, page_context
 
 
 def login_to_vimeo(sb, email, password, logger, config):
@@ -1200,6 +1221,14 @@ def login_to_vimeo(sb, email, password, logger, config):
                 )
             logger.info("Cloudflare on login page appears to have cleared; proceeding with form")
 
+        current_url, page_title, page_context = get_page_identity(sb)
+        if not is_login_page(current_url, page_title, page_context):
+            logger.info(
+                "Vimeo session is already authenticated; login form not required (url=%s)",
+                current_url or "unknown url",
+            )
+            return
+
         for selector in email_selectors:
             try:
                 sb.wait_for_element_visible(selector, timeout=10)
@@ -1209,6 +1238,13 @@ def login_to_vimeo(sb, email, password, logger, config):
             except Exception:
                 continue
         else:
+            current_url, page_title, page_context = get_page_identity(sb)
+            if not is_login_page(current_url, page_title, page_context):
+                logger.info(
+                    "Vimeo session became authenticated before email entry; continuing without form (url=%s)",
+                    current_url or "unknown url",
+                )
+                return
             raise RuntimeError("Email input not found on Vimeo login page")
 
         for selector in password_selectors:
@@ -1219,6 +1255,13 @@ def login_to_vimeo(sb, email, password, logger, config):
             except Exception:
                 continue
         else:
+            current_url, page_title, page_context = get_page_identity(sb)
+            if not is_login_page(current_url, page_title, page_context):
+                logger.info(
+                    "Vimeo session became authenticated before password entry; continuing without form (url=%s)",
+                    current_url or "unknown url",
+                )
+                return
             raise RuntimeError("Password input not found on Vimeo login page")
 
         for selector in submit_selectors:
@@ -1228,6 +1271,13 @@ def login_to_vimeo(sb, email, password, logger, config):
             except Exception:
                 continue
         else:
+            current_url, page_title, page_context = get_page_identity(sb)
+            if not is_login_page(current_url, page_title, page_context):
+                logger.info(
+                    "Vimeo session became authenticated before submit click; continuing without form (url=%s)",
+                    current_url or "unknown url",
+                )
+                return
             raise RuntimeError("Login submit button not found on Vimeo login page")
 
         logger.info(
@@ -1238,18 +1288,8 @@ def login_to_vimeo(sb, email, password, logger, config):
         )
         deadline = time.time() + login_completion_timeout
         while time.time() < deadline:
-            current_url = ""
-            page_title = ""
-            try:
-                current_url = sb.get_current_url()
-            except Exception:
-                pass
-            try:
-                page_title = sb.get_title()
-            except Exception:
-                pass
-
-            if not is_login_page(current_url, page_title):
+            current_url, page_title, page_context = get_page_identity(sb)
+            if not is_login_page(current_url, page_title, page_context):
                 logger.info("Logged in successfully")
                 return
             time.sleep(2)
